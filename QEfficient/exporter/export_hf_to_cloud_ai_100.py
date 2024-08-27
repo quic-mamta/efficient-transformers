@@ -20,7 +20,6 @@ from QEfficient.exporter.export_utils import export_onnx, fix_onnx_fp16, generat
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils import load_hf_tokenizer
 from QEfficient.utils.constants import QEFF_MODELS_DIR, Constants
-from QEfficient.utils.generate_inputs import InputHandler
 from QEfficient.utils.logging_utils import logger
 
 
@@ -201,48 +200,80 @@ def export_kvstyle_transformed_model_to_onnx(
     if seq_len <= 0:
         raise ValueError(f"Need seq_len to be greater than zero, got seq_len={seq_len}")
 
-    # Preprocess inputs
-    # Build inputs for prefill
-    input_handler = InputHandler(
-        batch_size=len(Constants.INPUT_STR),
-        tokenizer=tokenizer,
-        config=transformed_model.config,
-        prompt=Constants.INPUT_STR,
-        prompt_len=Constants.PROMPT_LEN,
-        ctx_len=seq_len,
-    )
-    inputs = input_handler.prepare_pytorch_inputs()
+    import transformers
+
+    # Load tokenizer
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    num_kv_heads = 32
+    hidden_size = 128
+    n_layer = 1  # 32
+    ctx_len = 65  # model.config.num_window_length+1
+
+    inputs = tokenizer("My name is", return_tensors="pt")
+    batch_size, prompt_len = inputs["input_ids"].shape
+    inputs.pop("attention_mask")
+    inputs["position_ids"] = torch.arange(prompt_len).view(batch_size, -1)
+
+    past_key_values = []
+    for layer_idx in range(n_layer):
+        keys = torch.zeros(
+            batch_size,
+            num_kv_heads,
+            ctx_len,
+            hidden_size,
+            dtype=torch.float32,
+        )
+        values = torch.zeros(
+            batch_size,
+            num_kv_heads,
+            ctx_len,
+            hidden_size,
+            dtype=torch.float32,
+        )
+        scores = torch.zeros(
+            batch_size,
+            num_kv_heads,
+            ctx_len,
+            dtype=torch.float32,
+        )
+        past_key_values.append(keys)
+        past_key_values.append(values)
+        past_key_values.append(scores)
+
+    inputs["past_key_values"] = tuple(past_key_values)
 
     pt_outputs = transformed_model(**inputs)
     output_names = list(pt_outputs.keys())
 
     # Raise error if expected outputs are not present
-    assert "logits" in output_names, "logits not found in output"
-    assert "past_key_values" in output_names, "past_key_values not found in output"
+    assert set(output_names) == {"logits", "past_key_values"}
 
-    # Build inputs for next iteration from outputs
     # Build inputs for decode
-    inputs = input_handler.update_pytorch_inputs(inputs, pt_outputs)
+    inputs["input_ids"] = pt_outputs.logits.detach().argmax(2)
+    inputs["position_ids"] = inputs["position_ids"].max(1, keepdim=True).values + 1
+    print(tokenizer.batch_decode(inputs["input_ids"]))
 
     # To avoid issues in onnx export
-    inputs["position_ids"] = torch.full((1, 1), seq_len - 1)
-
-    # Run PyTorch inference with past
+    inputs["position_ids"] = torch.full((batch_size, 1), ctx_len - 1)
     pt_outputs = transformed_model(**inputs)
-    output_names = list(pt_outputs.keys())
 
     # Add pkv into output_names
     pkv = inputs["past_key_values"]
     pkv_idx = output_names.index("past_key_values")
-    key_value_names = [f"past_{x}.{i}" for i in range(len(pkv)) for x in ["key", "value"]]
+    key_value_names = [f"past_{x}.{i}" for i in range(n_layer) for x in ["key", "value", "scores"]]
     output_names[pkv_idx : pkv_idx + 1] = [x + "_RetainedState" for x in key_value_names]
 
     # Replace nested past_key_values outputs with separate KV tensors
     pt_outputs = dict(pt_outputs)
     pkv_out = pt_outputs.pop("past_key_values")
-    for i, (key, value) in enumerate(pkv_out):
-        pt_outputs[f"past_key.{i}_RetainedState"] = key
-        pt_outputs[f"past_value.{i}_RetainedState"] = value
+
+    for i in range(n_layer):
+        pt_outputs[f"past_key.{i}_RetainedState"] = pkv_out[3 * i]
+        pt_outputs[f"past_value.{i}_RetainedState"] = pkv_out[3 * i + 1]
+        pt_outputs[f"past_scores.{i}_RetainedState"] = pkv_out[3 * i + 2]
 
     model_base_name = model_name.replace("/", "_") + "_kv"
     os.makedirs(onnx_dir_path, exist_ok=True)
@@ -258,9 +289,11 @@ def export_kvstyle_transformed_model_to_onnx(
 
     # Replace nested past_key_values inputs with separate KV tensors
     inputs.pop("past_key_values")
-    for i, (key, value) in enumerate(pkv):
-        inputs[f"past_key.{i}"] = key
-        inputs[f"past_value.{i}"] = value
+
+    for i in range(n_layer):
+        inputs[f"past_key.{i}"] = pkv[3 * i]
+        inputs[f"past_value.{i}"] = pkv[3 * i + 1]
+        inputs[f"past_scores.{i}"] = pkv[3 * i + 2]
 
     # Run onnxrt inference
     input_names, ort_outputs = run_model_on_ort(
@@ -270,6 +303,7 @@ def export_kvstyle_transformed_model_to_onnx(
         pt_outputs=pt_outputs,
     )
 
+    # Fix onnx for FP16
     model_name = fix_onnx_fp16(
         inputs=inputs,
         output_names=output_names,

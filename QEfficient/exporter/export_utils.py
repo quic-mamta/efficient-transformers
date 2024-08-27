@@ -50,9 +50,10 @@ def export_onnx(
     for input_name in pt_input_names:
         if input_name in inputs:
             if input_name == "past_key_values":
-                for i in range(len(inputs[input_name])):
+                for i in range(1):  # len(inputs[input_name])):
                     input_names.append(f"past_key.{i}")
                     input_names.append(f"past_value.{i}")
+                    input_names.append(f"past_scores.{i}")
             else:
                 input_names.append(input_name)
             pt_inputs.append(inputs[input_name])

@@ -47,7 +47,7 @@ class ApiRunner:
             ctx_len=ctx_len,
         )
 
-        self.gen_len = self.input_handler.ctx_len - self.input_handler.prompt_len
+        self.gen_len = 100  # self.input_handler.ctx_len - self.input_handler.prompt_len
 
     @torch.no_grad()
     def run_hf_model_on_pytorch(self, model_hf):
@@ -93,11 +93,11 @@ class ApiRunner:
 
         pt_outputs = model(**inputs)
         for _ in range(1, self.gen_len):
-            generated_ids.append(pt_outputs["logits"].argmax(-1).reshape(-1, 1))
+            generated_ids.append(pt_outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1))
             inputs = self.input_handler.update_pytorch_inputs(inputs, pt_outputs)
             pt_outputs = model(**inputs)
 
-        generated_ids.append(pt_outputs["logits"].argmax(-1).reshape(-1, 1))
+        generated_ids.append(pt_outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1))
         generated_ids = np.concatenate(generated_ids, axis=1)
         predicted_string = self.input_handler.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         print("QEff Transformed HF Model Outputs (Torch CPU): \n")

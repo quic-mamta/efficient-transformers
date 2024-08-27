@@ -41,37 +41,45 @@ class InputHandler:
             :Dict: input_ids, position_ids, past_key_values
         """
 
-        inputs = self.tokenizer(
-            self.prompt,
-            return_tensors="pt",
-            padding=True,
-        )
-        input_ids = inputs["input_ids"]
-        batch_size, input_len = input_ids.shape
-        inputs.pop("attention_mask")
-        position_ids = torch.arange(input_len).view(1, -1)
-        inputs["input_ids"] = torch.concat(
-            [
-                input_ids,
-                torch.ones((batch_size, self.prompt_len - input_len), dtype=torch.int64)
-                * (self.tokenizer.pad_token_id),
-            ],
-            1,
-        )
-        inputs["position_ids"] = torch.concat(
-            [
-                position_ids,
-                torch.ones((batch_size, self.prompt_len - input_len), dtype=torch.int64) * (-1),
-            ],
-            1,
-        )
+        num_kv_heads = 32
+        hidden_size = 128
+        ctx_len = 65  # config.num_window_length+1
+
+        input_ids = self.tokenizer(self.prompt, return_tensors="pt").input_ids
+        batch_size, seq_len = input_ids.shape
+        position_ids = torch.arange(seq_len).reshape(batch_size, -1)
+
+        past_key_values = None
 
         past_key_values = []
-        for i in range(self.n_layer):
-            past_key = torch.zeros((self.padding_shape), dtype=torch.float32)
-            past_value = torch.zeros((self.padding_shape), dtype=torch.float32)
-            pkv = (past_key, past_value)
-            past_key_values.append(pkv)
+        for layer_idx in range(self.n_layer):
+            keys = torch.zeros(
+                batch_size,
+                num_kv_heads,
+                ctx_len,
+                hidden_size,
+                dtype=torch.float32,
+            )
+            values = torch.zeros(
+                batch_size,
+                num_kv_heads,
+                ctx_len,
+                hidden_size,
+                dtype=torch.float32,
+            )
+            scores = torch.zeros(
+                batch_size,
+                num_kv_heads,
+                ctx_len,
+                dtype=torch.float32,
+            )
+            past_key_values.append(keys)
+            past_key_values.append(values)
+            past_key_values.append(scores)
+
+        inputs = {}
+        inputs["input_ids"] = input_ids
+        inputs["position_ids"] = position_ids
         inputs["past_key_values"] = tuple(past_key_values)
 
         return inputs
@@ -88,11 +96,13 @@ class InputHandler:
             :Dict: Updated input_ids, position_ids and past_key_values
         """
         updated_inputs = {}
-        updated_inputs["input_ids"] = pt_outputs["logits"].argmax(-1).reshape(-1, 1)
-        updated_inputs["position_ids"] = inputs["position_ids"].max(1, keepdim=True).values + 1
-        updated_inputs["past_key_values"] = tuple(
-            [(key.detach(), value.detach()) for key, value in pt_outputs["past_key_values"]]
-        )
+        if inputs["position_ids"][0][0] < 64:
+            updated_inputs["position_ids"] = inputs["position_ids"].max(1, keepdim=True).values + 1
+        else:
+            updated_inputs["position_ids"] = inputs["position_ids"]
+
+        updated_inputs["input_ids"] = pt_outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1)
+        updated_inputs["past_key_values"] = pt_outputs.past_key_values
         return updated_inputs
 
     def prepare_ort_inputs(self):
