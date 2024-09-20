@@ -19,7 +19,7 @@ pipeline
                     python3.8 -m venv preflight_qeff
                     . preflight_qeff/bin/activate
                     pip install --upgrade pip setuptools
-                    pip install .[test]
+                    pip install .[test] --extra-index-url https://download.pytorch.org/whl/cpu
                     pip install junitparser pytest-xdist
                     rm -rf QEfficient
                 '''
@@ -36,7 +36,7 @@ pipeline
                     sh '''
                     . preflight_qeff/bin/activate
                     export TOKENIZERS_PARALLELISM=false
-                    pytest tests --ignore tests/cloud -n 4 --junitxml=tests/tests_log1.xml
+                    pytest tests --ignore tests/cloud --junitxml=tests/tests_log1.xml
                     pytest tests/cloud --junitxml=tests/tests_log2.xml
                     junitparser merge tests/tests_log1.xml tests/tests_log2.xml tests/tests_log.xml
                     deactivate
