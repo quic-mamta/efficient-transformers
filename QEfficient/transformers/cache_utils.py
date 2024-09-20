@@ -6,10 +6,10 @@
 # -----------------------------------------------------------------------------
 
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import DynamicCache
 
 from QEfficient.customop import CtxGatherFunc, CtxGatherFuncCB, CtxScatterFunc, CtxScatterFuncCB
 
@@ -56,7 +56,6 @@ class QEffDynamicCache(DynamicCache):
             self.value_cache.append(value_states)
             k_out, v_out = key_states, value_states
         else:
-            breakpoint()
             position_ids = cache_kwargs.get("position_ids")
             batch_index = cache_kwargs.get("batch_index", None)  # Check and fetch batch index value form the kwargs
 
@@ -101,7 +100,22 @@ class QEffDynamicCache(DynamicCache):
             v_out = torch.where(invalid_mask.unsqueeze(-1), torch.tensor(0.0, dtype=torch.float32), v_out)
 
         return k_out, v_out
+        
+        
+        
+        
+        
+        
 
+
+
+
+
+        
+from dataclasses import dataclass
+from typing import List
+
+from transformers.cache_utils import Cache
 
 class HHCache(Cache):
     """
@@ -124,7 +138,6 @@ class HHCache(Cache):
         self.window_length = window_length
         self.num_hh_tokens = num_hh_tokens
         self.accumulated_attention_scores: List[torch.Tensor] = []
-        self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -132,11 +145,7 @@ class HHCache(Cache):
         sequence length.
         """
         if layer_idx < len(self):
-            return (
-                self.key_cache[layer_idx],
-                self.value_cache[layer_idx],
-                self.accumulated_attention_scores[layer_idx],
-            )
+            return (self.key_cache[layer_idx], self.value_cache[layer_idx], self.accumulated_attention_scores[layer_idx])
         else:
             raise KeyError(f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}")
 
@@ -192,21 +201,17 @@ class HHCache(Cache):
         """
         if accumulated_attention_scores is not None:
             self.accumulated_attention_scores.append(accumulated_attention_scores)
-
+        
         if len(self.key_cache) <= layer_idx:
             self.key_cache.append(key_states)
             self.value_cache.append(value_states)
             k_out, v_out = key_states, value_states
         else:
             position_ids = cache_kwargs.get("position_ids")
-
+            
             # Scatter
-            self.key_cache[layer_idx] = CtxScatterFunc.apply(
-                self.key_cache[layer_idx], position_ids, key_states
-            ).clone()
-            self.value_cache[layer_idx] = CtxScatterFunc.apply(
-                self.value_cache[layer_idx], position_ids, value_states
-            ).clone()
+            self.key_cache[layer_idx] = CtxScatterFunc.apply(self.key_cache[layer_idx], position_ids, key_states).clone()
+            self.value_cache[layer_idx] = CtxScatterFunc.apply(self.value_cache[layer_idx], position_ids, value_states).clone()
             k_out, v_out = self.key_cache[layer_idx], self.value_cache[layer_idx]
 
             # Gather
@@ -222,8 +227,28 @@ class HHCache(Cache):
             k_out = CtxGatherFunc.apply(k_out, ctx_indices)
             v_out = CtxGatherFunc.apply(v_out, ctx_indices)
             v_out = torch.where(invalid_mask.unsqueeze(-1), torch.tensor(0.0, dtype=torch.float32), v_out)
-
+ 
         return k_out, v_out
+        
+    '''def evict_kv(self, layer_idx):
+    
+        # Update KV Cache
+        seq_scores = self.accumulated_attention_scores[layer_idx][:, :, :-self.window_length + self.num_hh_tokens] 
+        _, keep_hh_index = torch.topk(seq_scores, self.num_hh_tokens, dim=-1)
+        keep_hh_index = keep_hh_index.sort().values
+        keep_local_index = torch.arange(self.get_seq_length(layer_idx) - self.window_length + self.num_hh_tokens, self.get_seq_length(layer_idx), device=keep_hh_index.device).repeat(keep_hh_index.shape[0], keep_hh_index.shape[1], 1)
+        keep_index = torch.cat([keep_hh_index, keep_local_index], dim=-1)
+        keep_index_expanded = keep_index.unsqueeze(-1).expand(-1, -1, -1, self.key_cache[layer_idx].size(-1))
+        
+        a = torch.gather(self.key_cache[layer_idx], 2, keep_index_expanded)
+        b = torch.gather(self.value_cache[layer_idx], 2, keep_index_expanded)
+        c = torch.gather(self.accumulated_attention_scores[layer_idx], 2, keep_index)
+        
+        print("****running evict_kv")
+        
+        return a, b, c
+    '''
+ 
 
     def update_slimming(
         self,
@@ -249,68 +274,50 @@ class HHCache(Cache):
         """
         position_ids = cache_kwargs.get("position_ids")
         pos_ids_max = position_ids.max()
+        
 
         # Update score metrics (Accumulated attention scores)
         if len(self.accumulated_attention_scores) <= layer_idx:
-            self.accumulated_attention_scores.append(
-                attention_scores.sum(2)[:, ::num_kv_groups, :]
-            )  # [bs, num_heads, key_len]
+            self.accumulated_attention_scores.append(attention_scores.sum(2)[:,::num_kv_groups, :]) # [bs, num_heads, key_len]
         else:
             updated_attention_scores = attention_scores.sum(2)[:, ::num_kv_groups, :]  # [bs, num_heads, key_len]
-            # num_new_tokens = attention_scores.shape[2]
-            # updated_attention_scores[:, :, :-num_new_tokens] += self.accumulated_attention_scores[layer_idx]
-            # updated_attention_scores[:, :, :pos_ids_max] += self.accumulated_attention_scores[layer_idx][:,:,:pos_ids_max]
             updated_attention_scores += self.accumulated_attention_scores[layer_idx]
-
             self.accumulated_attention_scores[layer_idx] = updated_attention_scores
-
+        
+        
+        #import ipdb; ipdb.set_trace()
+        a = torch.div(torch.tensor(pos_ids_max), torch.tensor(self.window_length), rounding_mode='floor')
+        
         # Update KV Cache
-        # if self.get_seq_length(layer_idx) > self.window_length:
-        if pos_ids_max == self.window_length:
-            seq_scores = self.accumulated_attention_scores[layer_idx][:, :, : -self.window_length + self.num_hh_tokens]
-            # no common kv pair in heavy hitter and recent tokens
-            _, keep_hh_index = torch.topk(seq_scores, self.num_hh_tokens, dim=-1)
-            keep_hh_index = keep_hh_index.sort().values
+        seq_scores = self.accumulated_attention_scores[layer_idx][:, :, :-self.window_length + self.num_hh_tokens] 
+        _, keep_hh_index = torch.topk(seq_scores, self.num_hh_tokens, dim=-1)
+        keep_hh_index = keep_hh_index.sort().values
+        keep_local_index = torch.arange(self.get_seq_length(layer_idx) - self.window_length + self.num_hh_tokens, self.get_seq_length(layer_idx), device=keep_hh_index.device).repeat(keep_hh_index.shape[0], keep_hh_index.shape[1], 1)
+        keep_index = torch.cat([keep_hh_index, keep_local_index], dim=-1)
+        keep_index_expanded = keep_index.unsqueeze(-1).expand(-1, -1, -1, self.key_cache[layer_idx].size(-1))
+        
+        self.key_cache[layer_idx][:,:,:self.window_length] = (1-a) * self.key_cache[layer_idx][:,:,:self.window_length] + a * torch.gather(self.key_cache[layer_idx], 2, keep_index_expanded)
+        self.value_cache[layer_idx][:,:,:self.window_length] = (1-a) * self.value_cache[layer_idx][:,:,:self.window_length] + a * torch.gather(self.value_cache[layer_idx], 2, keep_index_expanded)
+        self.accumulated_attention_scores[layer_idx][:,:,:self.window_length] = (1-a) * self.accumulated_attention_scores[layer_idx][:,:,:self.window_length] + a * (torch.gather(self.accumulated_attention_scores[layer_idx], 2, keep_index))
+        
+        '''
+        print(a)
+        self.key_cache[layer_idx][:,:,:self.window_length] = (1-a) * self.key_cache[layer_idx][:,:,:self.window_length] + a * self.evict_kv(layer_idx)[0]
+        self.value_cache[layer_idx][:,:,:self.window_length] = (1-a) * self.value_cache[layer_idx][:,:,:self.window_length] + a * self.evict_kv(layer_idx)[1]
+        self.accumulated_attention_scores[layer_idx][:,:,:self.window_length] = (1-a) * self.accumulated_attention_scores[layer_idx][:,:,:self.window_length] + a * self.evict_kv(layer_idx)[2]
+        '''
 
-            keep_local_index = torch.arange(
-                self.get_seq_length(layer_idx) - self.window_length + self.num_hh_tokens,
-                self.get_seq_length(layer_idx),
-                device=keep_hh_index.device,
-            ).repeat(keep_hh_index.shape[0], keep_hh_index.shape[1], 1)
-            keep_index = torch.cat([keep_hh_index, keep_local_index], dim=-1)
-
-            bsz, num_heads, _, head_dim = self.key_cache[layer_idx].shape
-            mask = torch.zeros(self.accumulated_attention_scores[layer_idx].shape, dtype=torch.bool).to(
-                keep_hh_index.device
-            )
-            mask = mask.scatter(-1, keep_index, 1)
-
-            # print("**********************")
-            self.key_cache[layer_idx][:, :, : self.window_length] = self.key_cache[layer_idx][mask].reshape(
-                bsz, num_heads, self.window_length, head_dim
-            )  # view
-            self.value_cache[layer_idx][:, :, : self.window_length] = self.value_cache[layer_idx][mask].reshape(
-                bsz, num_heads, self.window_length, head_dim
-            )  # view
-            self.accumulated_attention_scores[layer_idx][:, :, : self.window_length] = (
-                self.accumulated_attention_scores[layer_idx][mask].reshape(bsz, num_heads, self.window_length)
-            )  # view
+        
 
     def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
         """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += (
-                self.key_cache[layer_idx],
-                self.value_cache[layer_idx],
-                self.accumulated_attention_scores[layer_idx],
-            )
+            legacy_cache += ((self.key_cache[layer_idx], self.value_cache[layer_idx], self.accumulated_attention_scores[layer_idx],))
         return legacy_cache
 
     @classmethod
-    def from_legacy_cache(
-        cls, window_length: int, num_hh_tokens: int, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    ) -> "DynamicCache":
+    def from_legacy_cache(cls, window_length: int, num_hh_tokens: int, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "DynamicCache":
         """Converts a cache in the legacy cache format into an equivalent `DynamicCache`."""
         cache = cls(window_length, num_hh_tokens)
         if past_key_values is not None:
@@ -318,12 +325,10 @@ class HHCache(Cache):
                 key_states = past_key_values[layer_idx * 3]
                 value_states = past_key_values[layer_idx * 3 + 1]
                 accumulated_attention_scores = past_key_values[layer_idx * 3 + 2]
-                cache.update(
-                    key_states, value_states, layer_idx, accumulated_attention_scores=accumulated_attention_scores
-                )
+                cache.update(key_states, value_states, layer_idx, accumulated_attention_scores=accumulated_attention_scores)
         return cache
 
-    """def evict_for_space(self, space_needed: int):
+    '''def evict_for_space(self, space_needed: int):
         num_layers = len(self.key_cache)
 
         # Update score metrics (Accumulated attention scores)
@@ -350,4 +355,4 @@ class HHCache(Cache):
                 self.key_cache[layer_idx] = self.key_cache[layer_idx][mask].view(bsz, num_heads, -1, head_dim)
                 self.value_cache[layer_idx] = self.value_cache[layer_idx][mask].view(bsz, num_heads, -1, head_dim)
                 self.accumulated_attention_scores[layer_idx] = self.accumulated_attention_scores[layer_idx][mask].view(bsz, num_heads, -1)
-    """
+    '''
