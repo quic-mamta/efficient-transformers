@@ -10,6 +10,7 @@ from dataclasses import asdict
 
 import torch.distributed as dist
 import torch.utils.data as data_utils
+import yaml
 from peft import (
     AdaptionPromptConfig,
     LoraConfig,
@@ -46,6 +47,13 @@ def update_config(config, **kwargs):
                 assert False, f"Warning: unknown parameter {k}"
 
 
+def validate_peft_config_yaml(data):
+    required_fields = ["r", "lora_alpha", "target_modules", "bias", "task_type", "lora_dropout", "inference_mode"]
+    missing_fields = [field for field in required_fields if field not in data]
+    if missing_fields:
+        raise ValueError(f"Missing fields in provided peft config YAML: {missing_fields}")
+
+
 def generate_peft_config(train_config, kwargs):
     configs = (lora_config, prefix_config)
     peft_configs = (LoraConfig, AdaptionPromptConfig, PrefixTuningConfig)
@@ -54,12 +62,17 @@ def generate_peft_config(train_config, kwargs):
     if train_config.peft_method not in names:
         raise RuntimeError(f"Peft config not found: {train_config.peft_method}")
 
-    config = configs[names.index(train_config.peft_method)]()
+    if train_config.peft_config_path is not None:
+        with open(train_config.peft_config_path, "r") as file:
+            data = yaml.safe_load(file)
+        validate_peft_config_yaml(data)
+        config = lora_config(**data)
+    else:
+        config = configs[names.index(train_config.peft_method)]()
 
     update_config(config, **kwargs)
     params = asdict(config)
     peft_config = peft_configs[names.index(train_config.peft_method)](**params)
-
     return peft_config
 
 

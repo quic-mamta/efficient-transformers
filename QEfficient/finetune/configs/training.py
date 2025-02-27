@@ -57,3 +57,4 @@ class train_config:
     grad_scaler: bool = True
     dump_root_dir: str = "meta-llama-samsum-mismatches/step_"
     opByOpVerifier: bool = False
+    peft_config_path: str = None  # "examples/finetune/peft_config.yaml" example yaml file present here
