@@ -155,6 +155,8 @@ class QEFFBaseModel(ABC):
                     for i in range(len(example_inputs["past_key_values"])):
                         if len(example_inputs["past_key_values"][0]) == 2:
                             input_names.extend([f"past_key.{i}", f"past_value.{i}"])
+                        elif len(example_inputs["past_key_values"][0]) == 3:
+                            input_names.extend([f"past_key.{i}", f"past_value.{i}", f"past_scores.{i}"])
                         elif len(example_inputs["past_key_values"][0]) == 4:
                             input_names.extend(
                                 [
@@ -166,10 +168,14 @@ class QEFFBaseModel(ABC):
                             )
                         else:
                             raise ValueError(
-                                f"Unknown shape of past_key_values! Expected length of past_key_values for each layer to be either 2 or 4 but got {len(example_inputs['past_key_values'][0])}"
+                                f"Unknown shape of past_key_values! Expected length of past_key_values for each layer to be either 2, 3 or 4 but got {len(example_inputs['past_key_values'][0])}"
                             )
                 else:
                     input_names.append(param)
+
+        print("input_names:", input_names)
+        print("output_names:", output_names)
+        print(example_inputs)
 
         try:
             export_kwargs = {} if export_kwargs is None else export_kwargs

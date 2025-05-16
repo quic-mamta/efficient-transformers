@@ -50,7 +50,7 @@ class InputHandler:
             :Dict: input_ids, position_ids, past_key_values
         """
 
-        inputs = self.tokenizer(
+        """inputs = self.tokenizer(
             self.prompt,
             return_tensors="pt",
             padding=True,
@@ -75,6 +75,19 @@ class InputHandler:
             ],
             1,
         )
+        """
+
+        num_kv_heads = 32
+        hidden_size = 128
+        ctx_len = 65  # config.num_window_length+1
+
+        input_ids = self.tokenizer(self.prompt, return_tensors="pt").input_ids
+        batch_size, input_len = input_ids.shape
+        position_ids = torch.arange(input_len).reshape(batch_size, -1)
+
+        past_key_values = None
+        
+        inputs = {}
 
         if self.full_batch_size:
             inputs["input_ids"] = input_ids
@@ -82,11 +95,42 @@ class InputHandler:
             inputs["batch_index"] = torch.arange(1).view(-1, 1)
 
         past_key_values = []
-        for i in range(self.n_layer):
+        """for i in range(self.n_layer):
             past_key = torch.zeros((self.padding_shape), dtype=torch.float32)
             past_value = torch.zeros((self.padding_shape), dtype=torch.float32)
             pkv = (past_key, past_value)
             past_key_values.append(pkv)
+        """
+
+        for layer_idx in range(self.n_layer):
+            keys = torch.zeros(
+                batch_size,
+                num_kv_heads,
+                ctx_len,
+                hidden_size,
+                dtype=torch.float32,
+            )
+            values = torch.zeros(
+                batch_size,
+                num_kv_heads,
+                ctx_len,
+                hidden_size,
+                dtype=torch.float32,
+            )
+            scores = torch.zeros(
+                batch_size,
+                num_kv_heads,
+                ctx_len,
+                dtype=torch.float32,
+            )
+            past_key_values.append(keys)
+            past_key_values.append(values)
+            past_key_values.append(scores)
+
+        inputs = {}
+        inputs["input_ids"] = input_ids
+        inputs["position_ids"] = position_ids
+
         inputs["past_key_values"] = tuple(past_key_values)
 
         return inputs
@@ -117,12 +161,21 @@ class InputHandler:
             updated_inputs["batch_index"] = torch.arange(self.full_batch_size).view(-1, 1)
 
         else:
-            updated_inputs["input_ids"] = pt_outputs["logits"].argmax(-1).reshape(-1, 1)
+            if inputs["position_ids"][0][0] < 64:
+                updated_inputs["position_ids"] = inputs["position_ids"].max(1, keepdim=True).values + 1
+            else:
+                updated_inputs["position_ids"] = inputs["position_ids"]
+
+            updated_inputs["input_ids"] = pt_outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1)
+            updated_inputs["past_key_values"] = pt_outputs.past_key_values
+
+        """updated_inputs["input_ids"] = pt_outputs["logits"].argmax(-1).reshape(-1, 1)
             updated_inputs["position_ids"] = inputs["position_ids"].max(1, keepdim=True).values + 1
 
         updated_inputs["past_key_values"] = tuple(
             [(key.detach(), value.detach()) for key, value in pt_outputs["past_key_values"]]
         )
+        """
 
         return updated_inputs
 

@@ -5,7 +5,8 @@
 #
 # -----------------------------------------------------------------------------
 
-from typing import Callable, List, Optional, Tuple, Union
+import math
+from typing import List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -14,9 +15,9 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import (
     LlamaAttention,
-    LlamaConfig,
     LlamaDecoderLayer,
     LlamaForCausalLM,
     LlamaModel,
@@ -25,8 +26,16 @@ from transformers.models.llama.modeling_llama import (
     rotate_half,
 )
 
-from QEfficient.transformers.cache_utils import QEffDynamicCache
+from QEfficient.transformers.cache_utils import HHCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
+
+
+def apply_rotary_pos_emb_single(x, cos, sin, position_ids=None, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    x_embed = (x * cos) + (rotate_half(x) * sin)
+
+    return x_embed
 
 
 class QEffLlamaRotaryEmbedding(LlamaRotaryEmbedding):
@@ -122,9 +131,10 @@ class QEffLlamaAttention(LlamaAttention):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __qeff_init__(self):
-        self.rotary_emb = QEffLlamaRotaryEmbedding(config=self.config)
+        # self.rotary_emb = QEffLlamaRotaryEmbedding(config=self.config)
+        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
-    def forward(
+    """def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
@@ -172,6 +182,111 @@ class QEffLlamaAttention(LlamaAttention):
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights, past_key_value
+    """
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        batch_index: Optional[torch.LongTensor] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states, **kwargs)
+        key_states = self.k_proj(hidden_states, **kwargs)
+        value_states = self.v_proj(hidden_states, **kwargs)
+
+        query_states = query_states.view(hidden_shape).transpose(1, 2)
+        key_states = key_states.view(hidden_shape).transpose(1, 2)
+        value_states = value_states.view(hidden_shape).transpose(1, 2)
+
+        kv_seq_len = key_states.shape[-2]
+
+        # kv_seq_len = past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        kv_seq_len = (
+            past_key_value.get_seq_length(self.layer_idx) if past_key_value is not None else key_states.shape[-2]
+        )
+        # cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        # query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+        """if not self.positional_rolling:
+            cos, sin = self.rotary_emb(value_states, position_ids)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            if past_key_value is not None:
+                # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                cache_kwargs = {"sin": sin, "cos": cos}
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        else:
+        """
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"batch_index": batch_index, "position_ids": position_ids}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        """attention_interface: Callable = eager_attention_forward
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            scaling=self.scaling,
+            **kwargs,
+        )
+        """
+        if not position_ids.nelement() > 1:
+            # decoding stage
+            key_position_ids = torch.arange(kv_seq_len, device=hidden_states.device).unsqueeze(0)
+            # query_position_ids = position_ids #torch.full((bsz,1), int(position_ids.max(1).values)) #key_position_ids[:, -1].unsqueeze(0)
+        elif not kv_seq_len == position_ids.shape[-1]:
+            # prefilling stage with evicting
+            # query_position_ids = position_ids
+            key_position_ids = torch.arange(kv_seq_len, device=hidden_states.device).unsqueeze(0)
+        else:
+            # prefilling stage
+            # query_position_ids = position_ids
+            key_position_ids = position_ids
+
+        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+
+        key_cos, key_sin = self.rotary_emb(value_states, key_position_ids)
+        query_cos, query_sin = self.rotary_emb(value_states, position_ids)  # query_position_ids)
+
+        query_states = apply_rotary_pos_emb_single(query_states, query_cos, query_sin)
+        key_states = apply_rotary_pos_emb_single(key_states, key_cos, key_sin)
+
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        if attention_mask is not None:  # no matter the length, we just slice it
+            attn_weights = torch.where(attention_mask.bool(), torch.tensor(-10000.0, dtype=torch.float32), attn_weights)
+
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+
+        cache_kwargs = {"position_ids": position_ids}
+        # Update KV Cache based on Heavy-Hitter Oracle
+        if past_key_value is not None:
+            past_key_value.update_slimming(attn_weights, self.num_key_value_groups, self.layer_idx, cache_kwargs)
+
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+
         return attn_output, attn_weights, past_key_value
 
 
@@ -266,7 +381,8 @@ class QEffLlamaModel(LlamaModel):
         return_legacy_cache = False
         if use_cache and not isinstance(past_key_values, Cache):
             return_legacy_cache = True
-            past_key_values = QEffDynamicCache.from_legacy_cache(past_key_values)
+            # past_key_values = QEffDynamicCache.from_legacy_cache(past_key_values)
+            past_key_values = HHCache.from_legacy_cache(64, 32, past_key_values)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -276,6 +392,7 @@ class QEffLlamaModel(LlamaModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        # past_seen_tokens = position_ids.max()+1
         causal_mask = _create_causal_mask(position_ids=position_ids, target_length=past_seen_tokens)
 
         # embed positions

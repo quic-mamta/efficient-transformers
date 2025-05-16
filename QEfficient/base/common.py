@@ -62,6 +62,7 @@ class QEFFCommonLoader:
             pretrained_model_name_or_path=(local_model_dir if local_model_dir else pretrained_model_name_or_path),
             token=hf_token,
             continuous_batching=continuous_batching,
+            num_hidden_layers=1,
             **kwargs,
         )
         return qeff_model

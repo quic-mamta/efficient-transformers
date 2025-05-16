@@ -1446,7 +1446,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         fbs = constants.ONNX_EXPORT_EXAMPLE_FBS
         kv_cache_shape = get_padding_shape_from_config(
-            self.model.config, fbs if self.continuous_batching else bs, seq_len
+            self.model.config, fbs if self.continuous_batching else bs, 65 #seq_len
         )
         example_inputs = {
             "input_ids": torch.zeros((bs, seq_len), dtype=torch.int64),
@@ -1468,9 +1468,15 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 2: "ctx_len",
             }
         output_names = ["logits"]
+        
+        print("num_layers : ", self.num_layers)
+        print("kv_cache_shape : ", kv_cache_shape)
+
 
         for i in range(self.num_layers):
-            for kv in ["key", "value"]:
+            for kv in ["key", "value", "scores"]:
+                if kv == "scores":
+                    kv_cache_shape = kv_cache_shape[:3]
                 example_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape, dtype=torch.float32))
                 dynamic_axes[f"past_{kv}.{i}"] = pkv_dynamic_axes
                 output_names.append(f"past_{kv}.{i}_RetainedState")
