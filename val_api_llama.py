@@ -30,7 +30,6 @@ api_runner = ApiRunner(
 hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
 
 model_kv = transform_lm(model_hf)
-model_kv.eval()
 
 kv_tokens = api_runner.run_kv_model_on_pytorch(model_kv)
 """
