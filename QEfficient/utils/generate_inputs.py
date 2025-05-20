@@ -123,9 +123,9 @@ class InputHandler:
                 ctx_len,
                 dtype=torch.float32,
             )
-            past_key_values.append(keys)
-            past_key_values.append(values)
-            past_key_values.append(scores)
+            past_key_values.append([keys,values,scores])
+            #past_key_values.append(values)
+            #past_key_values.append(scores)
 
         inputs = {}
         inputs["input_ids"] = input_ids
