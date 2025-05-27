@@ -105,5 +105,3 @@ from QEfficient.generation.cloud_infer import QAICInferenceSession
 session = QAICInferenceSession(qpc_path, [4], enable_debug_logs=False)
 cloud_ai_100_tokens = api_runner.run_kv_model_on_cloud_ai_100(session, 32, [1,32,65,128])
 """
-
-#adding line

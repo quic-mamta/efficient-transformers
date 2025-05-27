@@ -8,6 +8,7 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from QEfficient.customop.ctx_scatter_gather import CtxGatherH2OFunc
 import torch
 from transformers.cache_utils import Cache, DynamicCache, EncoderDecoderCache
 
@@ -429,92 +430,7 @@ class HHCache(Cache):
             v_out = torch.where(invalid_mask.unsqueeze(-1), torch.tensor(0.0, dtype=torch.float32), v_out)
 
         return k_out, v_out
-        
-    def apply_h2o(
-        self,
-        gathered_scores,
-        cache_kwargs,
-        layer_idx
-    ):
-        
-        import ipdb;ipdb.set_trace()
-        
-        position_ids = cache_kwargs.get("position_ids")
-        kv_seq_len = cache_kwargs.get("kv_seq_len")
-        
-        select_hh_scores = gathered_scores[:, :, :kv_seq_len//2+1]
-        remove_index = torch.argmin(select_hh_scores, dim=-1)
-        
-        read_indices = torch.arange(kv_seq_len)
-        read_indices_exp = read_indices.expand(32,kv_seq_len)
-        
-        remove_index = remove_index.reshape(32,1)
-        
 
-        manipulate_indices = torch.where(read_indices_exp >= remove_index, torch.tensor(1), torch.tensor(0))
-        
-        read_indices_exp = read_indices_exp + manipulate_indices
-        if torch.onnx.is_in_onnx_export():
-            invalid_idx_value = torch.iinfo(torch.int32).max
-        else:
-            invalid_idx_value = 0
-        read_indices_exp[:,-1] = invalid_idx_value
-        
-        
-        
-        
-        
-        # Gather
-        
-        k_out = CtxGatherFunc.apply(k_out, ctx_indices)
-        v_out = CtxGatherFunc.apply(v_out, ctx_indices)
-        v_out = torch.where(invalid_mask.unsqueeze(-1), torch.tensor(0.0, dtype=torch.float32), v_out)
-        
-        
-        
-        write_indices = torch.arange(kv_seq_len)
-        
-        self.key_cache[layer_idx] = CtxScatterFunc.apply(self.key_cache[layer_idx], write_indices, key_states)
-        self.value_cache[layer_idx] = CtxScatterFunc.apply(
-            self.value_cache[layer_idx], position_ids, value_states
-        )
-        k_out, v_out = self.key_cache[layer_idx], self.value_cache[layer_idx]
-
-        
-        
-        
-
-        
-        
-        
-        
-        
-        
-        '''def get_h2o_read_indices(self, layer_idx):
-        "EVERYTHING STATIC SHAPE"
-        window_length = self.key_cache[layer_idx].shape[-1]
-        seq_scores = self.accumulated_attention_scores[layer_idx][:, :, : -window_length + self.num_hh_tokens]
-        # no common kv pair in heavy hitter and recent tokens
-        remove_index = torch.argmin(seq_scores, dim=-1)
-        read_indices = torch.arange(window_length)
-
-        manipulate_indices = torch.where(read_indices >= remove_index, torch.tensor(1), torch.tensor(0))
-        
-        read_indices = read_indices + manipulate_indices
-        read_indices[-1] = torch.iinfo(torch.int32).max 
-        return read_indices
-        '''
-          
-        return torch.tensor(1)
-        
-    def write_and_return(
-        self,
-        gathered_scores,
-        layer_idx
-    ):
-        self.accumulated_attention_scores[layer_idx] = gathered_scores
-        return torch.tensor(1)
-        
 
     def update_slimming(
         self,
@@ -538,7 +454,6 @@ class HHCache(Cache):
         Return:
             A tuple containing the updated key and value states.
         """
-        import ipdb; ipdb.set_trace()
         position_ids = cache_kwargs.get("position_ids")
         kv_seq_len = cache_kwargs.get("kv_seq_len")
         
@@ -550,66 +465,45 @@ class HHCache(Cache):
         
         gathered_scores +=  attn_scores
         
-        torch.where(position_ids.max() >= kv_seq_len, self.apply_h2o(gathered_scores, cache_kwargs, layer_idx), self.write_and_return(gathered_scores, layer_idx))
-        
-        
-        
-
-        
-        
-        
-        
-        
-        
-        
-        '''pos_ids_max = position_ids.max()
-
-        # Update score metrics (Accumulated attention scores)
-        if len(self.accumulated_attention_scores) <= layer_idx:
-            self.accumulated_attention_scores.append(
-                attention_scores.sum(2)[:, ::num_kv_groups, :]
-            )  # [bs, num_heads, key_len]
+        ######################
+        # making read indices#
+        ######################
+        select_hh_scores = gathered_scores[:, :, :kv_seq_len//2+1]
+        remove_index = torch.argmin(select_hh_scores, dim=-1)
+        read_indices = torch.arange(kv_seq_len)
+        read_indices_exp = read_indices.expand(32,kv_seq_len)
+        remove_index = remove_index.reshape(32,1)
+        manipulate_indices = torch.where(read_indices_exp >= remove_index, torch.tensor(1), torch.tensor(0))
+        read_indices_exp = read_indices_exp + manipulate_indices
+        if torch.onnx.is_in_onnx_export():
+            invalid_idx_value = torch.iinfo(torch.int32).max
         else:
-            updated_attention_scores = attention_scores.sum(2)[:, ::num_kv_groups, :]  # [bs, num_heads, key_len]
-            # num_new_tokens = attention_scores.shape[2]
-            # updated_attention_scores[:, :, :-num_new_tokens] += self.accumulated_attention_scores[layer_idx]
-            # updated_attention_scores[:, :, :pos_ids_max] += self.accumulated_attention_scores[layer_idx][:,:,:pos_ids_max]
-            updated_attention_scores += self.accumulated_attention_scores[layer_idx]
-
-            self.accumulated_attention_scores[layer_idx] = updated_attention_scores
-
-        # Update KV Cache
-        # if self.get_seq_length(layer_idx) > self.window_length:
-        if pos_ids_max == self.window_length:
-            seq_scores = self.accumulated_attention_scores[layer_idx][:, :, : -self.window_length + self.num_hh_tokens]
-            # no common kv pair in heavy hitter and recent tokens
-            _, keep_hh_index = torch.topk(seq_scores, self.num_hh_tokens, dim=-1)
-            keep_hh_index = keep_hh_index.sort().values
-
-            keep_local_index = torch.arange(
-                self.get_seq_length(layer_idx) - self.window_length + self.num_hh_tokens,
-                self.get_seq_length(layer_idx),
-                device=keep_hh_index.device,
-            ).repeat(keep_hh_index.shape[0], keep_hh_index.shape[1], 1)
-            keep_index = torch.cat([keep_hh_index, keep_local_index], dim=-1)
-
-            bsz, num_heads, _, head_dim = self.key_cache[layer_idx].shape
-            mask = torch.zeros(self.accumulated_attention_scores[layer_idx].shape, dtype=torch.bool).to(
-                keep_hh_index.device
-            )
-            mask = mask.scatter(-1, keep_index, 1)
-
-            # print("**********************")
-            self.key_cache[layer_idx][:, :, : self.window_length] = self.key_cache[layer_idx][mask].reshape(
-                bsz, num_heads, self.window_length, head_dim
-            )  # view
-            self.value_cache[layer_idx][:, :, : self.window_length] = self.value_cache[layer_idx][mask].reshape(
-                bsz, num_heads, self.window_length, head_dim
-            )  # view
-            self.accumulated_attention_scores[layer_idx][:, :, : self.window_length] = (
-                self.accumulated_attention_scores[layer_idx][mask].reshape(bsz, num_heads, self.window_length)
-            )  # view
-        '''
+            invalid_idx_value = 0
+        read_indices_exp[:,-1] = invalid_idx_value
+        read_indices_for_gather = read_indices_exp.unsqueeze(-1).expand(-1, -1, 128).unsqueeze(0)
+        
+        ###########
+        # where based H2O Magic
+        ###########
+        k_out = torch.where(position_ids.max() >= kv_seq_len, CtxGatherH2OFunc.apply(self.key_cache[layer_idx], read_indices_for_gather), self.key_cache[layer_idx])
+        v_out = torch.where(position_ids.max() >= kv_seq_len, CtxGatherH2OFunc.apply(self.value_cache[layer_idx], read_indices_for_gather), self.value_cache[layer_idx])
+        attn_scores = torch.where(position_ids.max() >= kv_seq_len, CtxGatherH2OFunc.apply(gathered_scores, read_indices_exp.unsqueeze(0)), gathered_scores)
+        
+        # --------- scatter ------------- #
+        bs = self.key_cache[layer_idx].shape[0]
+        write_indices = torch.arange(kv_seq_len).reshape(bs, kv_seq_len)
+        self.key_cache[layer_idx] = CtxScatterFunc.apply(self.key_cache[layer_idx], write_indices, k_out)
+        self.value_cache[layer_idx] = CtxScatterFunc.apply(self.value_cache[layer_idx], write_indices, v_out)
+        self.accumulated_attention_scores[layer_idx] = CtxScatterFunc3D.apply(self.accumulated_attention_scores[layer_idx], write_indices, attn_scores)
+        
+        
+        # Write all updates values
+        
+        
+        ######
+        # H2O done
+        ######
+        import ipdb; ipdb.set_trace()
 
     def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
         """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format."""
@@ -621,23 +515,6 @@ class HHCache(Cache):
                 self.accumulated_attention_scores[layer_idx])
             )
         return legacy_cache
-
-    '''@classmethod
-    def from_legacy_cache(
-        cls, window_length: int, num_hh_tokens: int, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    ) -> "DynamicCache":
-        """Converts a cache in the legacy cache format into an equivalent `DynamicCache`."""
-        cache = cls(window_length, num_hh_tokens)
-        if past_key_values is not None:
-            for layer_idx in range(len(past_key_values) // 3):
-                key_states = past_key_values[layer_idx * 3]
-                value_states = past_key_values[layer_idx * 3 + 1]
-                accumulated_attention_scores = past_key_values[layer_idx * 3 + 2]
-                cache.update(
-                    key_states, value_states, layer_idx, accumulated_attention_scores=accumulated_attention_scores
-                )
-        return cache
-    '''
         
     @classmethod
     def from_legacy_cache(

@@ -139,3 +139,26 @@ class CtxGatherFunc(torch.autograd.Function):
     @staticmethod
     def symbolic(g: torch.Graph, data: torch.Value, ctx_indices: torch.Value) -> torch.Value:
         return g.onnxscript_op(CtxGather, data, ctx_indices).setTypeAs(data)
+
+
+@onnxscript.script(onnxscript.values.Opset("com.qualcomm.cloud", 1))
+def CtxGatherH2O(data: onnxscript.FLOAT, read_indices: onnxscript.INT32) -> onnxscript.FLOAT:
+    return ops.GatherND(data, read_indices, batch_dims=2)
+
+
+class CtxGatherH2OFunc(torch.autograd.Function):
+    """
+    Function to gather only the valid key values from KV-cache.
+    """
+
+    @staticmethod
+    def forward(data: torch.Tensor, read_indices: torch.Tensor):
+        return torch.gather(data, dim=2, index=read_indices)
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, read_indices: torch.Value) -> torch.Value:
+        return g.onnxscript_op(CtxGatherH2O, data, read_indices).setTypeAs(data)
