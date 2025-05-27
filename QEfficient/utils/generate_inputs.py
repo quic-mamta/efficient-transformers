@@ -86,7 +86,7 @@ class InputHandler:
         position_ids = torch.arange(input_len).reshape(batch_size, -1)
 
         past_key_values = None
-        
+
         inputs = {}
 
         if self.full_batch_size:
@@ -123,13 +123,16 @@ class InputHandler:
                 ctx_len,
                 dtype=torch.float32,
             )
-            past_key_values.append([keys,values,scores])
-            #past_key_values.append(values)
-            #past_key_values.append(scores)
+            past_key_values.append([keys, values, scores])
+            # past_key_values.append(values)
+            # past_key_values.append(scores)
 
         inputs = {}
         inputs["input_ids"] = input_ids
         inputs["position_ids"] = position_ids
+
+        print("position_ids : ", position_ids)
+        print("input_ids : ", input_ids)
 
         inputs["past_key_values"] = tuple(past_key_values)
 
@@ -176,6 +179,8 @@ class InputHandler:
             [(key.detach(), value.detach()) for key, value in pt_outputs["past_key_values"]]
         )
         """
+        print("position_ids : ", updated_inputs["position_ids"])
+        print("input_ids : ", updated_inputs["input_ids"])
 
         return updated_inputs
 

@@ -8,7 +8,6 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from QEfficient.customop.ctx_scatter_gather import CtxGatherH2OFunc
 import torch
 from transformers.cache_utils import Cache, DynamicCache, EncoderDecoderCache
 
@@ -22,6 +21,7 @@ from QEfficient.customop import (
     CtxScatterFuncCB,
     CtxScatterFuncCB3D,
 )
+from QEfficient.customop.ctx_scatter_gather import CtxGatherH2OFunc
 
 
 class QEffDynamicCache(DynamicCache):
@@ -337,14 +337,13 @@ class HHCache(Cache):
         to the number of layers in the model.
         """
         return len(self.key_cache)
-        
+
     def initialize(self, key_states, value_states, attn_scores):
         self.key_cache.append(key_states)
         self.value_cache.append(value_states)
         self.accumulated_attention_scores.append(attn_scores)
         k_out, v_out, attn_sc_out = key_states, value_states, attn_scores
         return k_out, v_out, attn_sc_out
-    
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
@@ -431,7 +430,6 @@ class HHCache(Cache):
 
         return k_out, v_out
 
-
     def update_slimming(
         self,
         attn_weights: torch.Tensor,
@@ -456,79 +454,87 @@ class HHCache(Cache):
         """
         position_ids = cache_kwargs.get("position_ids")
         kv_seq_len = cache_kwargs.get("kv_seq_len")
-        
+
         attn_scores = attn_weights.sum(2)
-        
+
         cond = torch.tensor(position_ids.shape[-1] == 1)
-        #TODO: try to remove this extra write
-        gathered_scores = torch.where(cond, self.accumulated_attention_scores[layer_idx], self.accumulated_attention_scores[layer_idx]*0)
-        
-        gathered_scores +=  attn_scores
-        
+        # TODO: try to remove this extra write
+        gathered_scores = torch.where(
+            cond, self.accumulated_attention_scores[layer_idx], self.accumulated_attention_scores[layer_idx] * 0
+        )
+
+        gathered_scores += attn_scores
+
         ######################
         # making read indices#
         ######################
-        select_hh_scores = gathered_scores[:, :, :kv_seq_len//2+1]
+        select_hh_scores = gathered_scores[:, :, : kv_seq_len // 2 + 1]
         remove_index = torch.argmin(select_hh_scores, dim=-1)
         read_indices = torch.arange(kv_seq_len)
-        read_indices_exp = read_indices.expand(32,kv_seq_len)
-        remove_index = remove_index.reshape(32,1)
+        read_indices_exp = read_indices.expand(32, kv_seq_len)
+        remove_index = remove_index.reshape(32, 1)
         manipulate_indices = torch.where(read_indices_exp >= remove_index, torch.tensor(1), torch.tensor(0))
         read_indices_exp = read_indices_exp + manipulate_indices
         if torch.onnx.is_in_onnx_export():
             invalid_idx_value = torch.iinfo(torch.int32).max
         else:
             invalid_idx_value = 0
-        read_indices_exp[:,-1] = invalid_idx_value
+        read_indices_exp[:, -1] = invalid_idx_value
         read_indices_for_gather = read_indices_exp.unsqueeze(-1).expand(-1, -1, 128).unsqueeze(0)
-        
+
         ###########
         # where based H2O Magic
         ###########
-        k_out = torch.where(position_ids.max() >= kv_seq_len, CtxGatherH2OFunc.apply(self.key_cache[layer_idx], read_indices_for_gather), self.key_cache[layer_idx])
-        v_out = torch.where(position_ids.max() >= kv_seq_len, CtxGatherH2OFunc.apply(self.value_cache[layer_idx], read_indices_for_gather), self.value_cache[layer_idx])
-        attn_scores = torch.where(position_ids.max() >= kv_seq_len, CtxGatherH2OFunc.apply(gathered_scores, read_indices_exp.unsqueeze(0)), gathered_scores)
-        
+        k_out = torch.where(
+            position_ids.max() >= kv_seq_len,
+            CtxGatherH2OFunc.apply(self.key_cache[layer_idx], read_indices_for_gather),
+            self.key_cache[layer_idx],
+        )
+        v_out = torch.where(
+            position_ids.max() >= kv_seq_len,
+            CtxGatherH2OFunc.apply(self.value_cache[layer_idx], read_indices_for_gather),
+            self.value_cache[layer_idx],
+        )
+        attn_scores = torch.where(
+            position_ids.max() >= kv_seq_len,
+            CtxGatherH2OFunc.apply(gathered_scores, read_indices_exp.unsqueeze(0)),
+            gathered_scores,
+        )
+
         # --------- scatter ------------- #
         bs = self.key_cache[layer_idx].shape[0]
         write_indices = torch.arange(kv_seq_len).reshape(bs, kv_seq_len)
         self.key_cache[layer_idx] = CtxScatterFunc.apply(self.key_cache[layer_idx], write_indices, k_out)
         self.value_cache[layer_idx] = CtxScatterFunc.apply(self.value_cache[layer_idx], write_indices, v_out)
-        self.accumulated_attention_scores[layer_idx] = CtxScatterFunc3D.apply(self.accumulated_attention_scores[layer_idx], write_indices, attn_scores)
-        
-        
+        self.accumulated_attention_scores[layer_idx] = CtxScatterFunc.apply(
+            self.accumulated_attention_scores[layer_idx], write_indices, attn_scores
+        )
+
         # Write all updates values
-        
-        
+
         ######
         # H2O done
         ######
-        import ipdb; ipdb.set_trace()
 
     def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
         """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache.append(
-                (self.key_cache[layer_idx],
-                self.value_cache[layer_idx],
-                self.accumulated_attention_scores[layer_idx])
+            legacy_cache += (
+                [self.key_cache[layer_idx], self.value_cache[layer_idx], self.accumulated_attention_scores[layer_idx]],
             )
         return legacy_cache
-        
+
     @classmethod
     def from_legacy_cache(
         cls, window_length: int, num_hh_tokens: int, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     ) -> "DynamicCache":
         """Converts a cache in the legacy cache format into an equivalent `DynamicCache`."""
-        import ipdb; ipdb.set_trace()
         cache = cls(window_length, num_hh_tokens)
         if past_key_values is not None:
             for layer_idx in range(len(past_key_values)):
                 key_states = past_key_values[layer_idx][0]
                 value_states = past_key_values[layer_idx][1]
                 accumulated_attention_scores = past_key_values[layer_idx][2]
-                cache.initialize(
-                    key_states, value_states, accumulated_attention_scores
-                )
+                cache.initialize(key_states, value_states, accumulated_attention_scores)
         return cache

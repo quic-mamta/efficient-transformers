@@ -25,7 +25,7 @@ from transformers.models.llama.modeling_llama import (
     rotate_half,
 )
 
-from QEfficient.transformers.cache_utils import HHCache, QEffDynamicCache
+from QEfficient.transformers.cache_utils import HHCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 
 
@@ -34,6 +34,7 @@ def apply_rotary_pos_emb_single(x, cos, sin, position_ids=None, unsqueeze_dim=1)
     sin = sin.unsqueeze(unsqueeze_dim)
     x_embed = (x * cos) + (rotate_half(x) * sin)
     return x_embed
+
 
 class QEffLlamaRotaryEmbedding(LlamaRotaryEmbedding):
     """
@@ -153,18 +154,20 @@ class QEffLlamaAttention(LlamaAttention):
         key_states = key_states.view(hidden_shape).transpose(1, 2)
         value_states = value_states.view(hidden_shape).transpose(1, 2)
 
-        kv_seq_len = (past_key_value.get_seq_length(self.layer_idx) if past_key_value is not None else key_states.shape[-2])
-        #kv_seq_len = key_states.shape[-2]
-        #kv_seq_len = past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        kv_seq_len = (
+            past_key_value.get_seq_length(self.layer_idx) if past_key_value is not None else key_states.shape[-2]
+        )
+        # kv_seq_len = key_states.shape[-2]
+        # kv_seq_len = past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
-        #self.rotary_emb = QEffLlamaRotaryEmbedding(config=self.config)
-        #cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        #query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids) 
-        
+        # self.rotary_emb = QEffLlamaRotaryEmbedding(config=self.config)
+        # cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        # query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"batch_index": batch_index, "position_ids": position_ids}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)           
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         """if not self.positional_rolling:
             cos, sin = self.rotary_emb(value_states, position_ids)
@@ -195,8 +198,7 @@ class QEffLlamaAttention(LlamaAttention):
 
         query_states = apply_rotary_pos_emb_single(query_states, query_cos, query_sin)
         key_states = apply_rotary_pos_emb_single(key_states, key_cos, key_sin)
-        
-        
+
         attention_interface: Callable = eager_attention_forward
 
         attn_output, attn_weights = attention_interface(
@@ -309,7 +311,7 @@ class QEffLlamaModel(LlamaModel):
         return_legacy_cache = False
         if use_cache and not isinstance(past_key_values, Cache):
             return_legacy_cache = True
-            #past_key_values = QEffDynamicCache.from_legacy_cache(past_key_values)
+            # past_key_values = QEffDynamicCache.from_legacy_cache(past_key_values)
             past_key_values = HHCache.from_legacy_cache(64, 32, past_key_values)
 
         if cache_position is None:
@@ -320,7 +322,7 @@ class QEffLlamaModel(LlamaModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        #past_seen_tokens = position_ids.max()+1
+        # past_seen_tokens = position_ids.max()+1
         causal_mask = _create_causal_mask(position_ids=position_ids, target_length=past_seen_tokens)
 
         # embed positions

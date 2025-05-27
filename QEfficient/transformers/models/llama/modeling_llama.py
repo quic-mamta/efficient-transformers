@@ -5,7 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-from typing import Callable, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -25,7 +25,7 @@ from transformers.models.llama.modeling_llama import (
     rotate_half,
 )
 
-from QEfficient.transformers.cache_utils import HHCache, QEffDynamicCache
+from QEfficient.transformers.cache_utils import HHCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 
 
@@ -150,37 +150,38 @@ class QEffLlamaAttention(LlamaAttention):
         kv_seq_len = key_states.shape[-2]
 
         kv_seq_len = past_key_value.get_seq_length(self.layer_idx)
-        
-        cond = torch.tensor(position_ids.shape[-1] == 1  and position_ids.max() >= kv_seq_len)
-        position_ids = torch.where(cond, torch.tensor([[kv_seq_len-1]]), position_ids)
-        
+
+        cond = torch.tensor(position_ids.shape[-1] == 1 and position_ids.max() >= kv_seq_len)
+        position_ids = torch.where(cond, torch.tensor([[kv_seq_len - 1]]), position_ids)
+
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-        
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "batch_index": batch_index, "position_ids": position_ids, "kv_seq_len":kv_seq_len}
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "batch_index": batch_index,
+                "position_ids": position_ids,
+                "kv_seq_len": kv_seq_len,
+            }
             key_states, value_states = past_key_value.update_kv(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        
-        
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-    
+
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
         if attention_mask is not None:
             attn_weights = torch.where(attention_mask, torch.tensor(-10000.0, dtype=torch.float32), attn_weights)
-    
+
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        
+
         # calculating attn scores and evicting from cache
         past_key_value.update_slimming(attn_weights, self.num_key_value_groups, self.layer_idx, cache_kwargs)
-        
+
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).contiguous()
-        
-
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -281,7 +282,7 @@ class QEffLlamaModel(LlamaModel):
             past_key_values = HHCache.from_legacy_cache(64, 32, past_key_values)
 
         if cache_position is None:
-            #TODO : check if get_seq_length works correctly
+            # TODO : check if get_seq_length works correctly
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             cache_position = torch.arange(
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device

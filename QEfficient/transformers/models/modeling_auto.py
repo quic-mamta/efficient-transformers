@@ -1468,10 +1468,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 2: "ctx_len",
             }
         output_names = ["logits"]
-        
+
         print("num_layers : ", self.num_layers)
         print("kv_cache_shape : ", kv_cache_shape)
-
 
         for i in range(self.num_layers):
             for kv in ["key", "value", "scores"]:
@@ -1479,7 +1478,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     example_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape[:3], dtype=torch.float32))
                 else:
                     example_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape, dtype=torch.float32))
-                    
+
                 dynamic_axes[f"past_{kv}.{i}"] = pkv_dynamic_axes
                 output_names.append(f"past_{kv}.{i}_RetainedState")
 
