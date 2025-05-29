@@ -50,8 +50,8 @@ class QEffLlamaRotaryEmbedding(LlamaRotaryEmbedding):
         freqs = torch.outer(t, self.inv_freq)
 
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos(), persistent=False)
-        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+        self.register_buffer("cos_cached", emb.cos(), persistent=True)
+        self.register_buffer("sin_cached", emb.sin(), persistent=True)
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]

@@ -79,7 +79,7 @@ class InputHandler:
 
         num_kv_heads = 32
         hidden_size = 128
-        ctx_len = 65  # config.num_window_length+1
+        ctx_len = 513  # config.num_window_length+1
 
         input_ids = self.tokenizer(self.prompt, return_tensors="pt").input_ids
         batch_size, input_len = input_ids.shape

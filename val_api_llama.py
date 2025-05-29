@@ -40,14 +40,33 @@ def load_causal_lm_model(model_config):
 
 model_name = "meta-llama/Llama-2-7b-chat-hf"
 model_config = {"model_name": model_name}
-model_config["n_layer"] = 32
+model_config["n_layer"] = 1
 model_hf, _ = load_causal_lm_model(model_config)
 
 tokenizer = load_hf_tokenizer(pretrained_model_name_or_path=model_name)
 config = model_hf.config
 #prompt = "Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions."
-prompt = "5 things to do in India?"
+#prompt = "5 things to do in India?"
+
+
+prompt = """
+Analyze the impact of artificial intelligence on healthcare in the next decade. Provide insights on AI-driven diagnostics, personalized medicine, robotic surgeries, and predictive analytics. Discuss benefits, risks, ethical concerns, and regulatory challenges. Use real-world examples to illustrate key points. Maintain an objective, well-researched perspective with structured formatting.
+
+Analyze the impact of artificial intelligence on healthcare in the next decade. Provide insights on AI-driven diagnostics, personalized medicine, robotic surgeries, and predictive analytics. Discuss benefits, risks, ethical concerns, and regulatory challenges. Use real-world examples to illustrate key points. Maintain an objective, well-researched perspective with structured formatting.
+
+Analyze the impact of artificial intelligence on healthcare in the next decade. Provide insights on AI-driven diagnostics, personalized medicine, robotic surgeries, and predictive analytics. Discuss benefits, risks, ethical concerns, and regulatory challenges. Use real-world examples to illustrate key points. Maintain an objective, well-researched perspective with structured formatting.
+
+Analyze the impact of artificial intelligence on healthcare in the next decade. Provide insights on AI-driven diagnostics, personalized medicine, robotic surgeries, and predictive analytics. Discuss benefits, risks, ethical concerns, and regulatory challenges. Use real-world examples to illustrate key points. Maintain an objective, well-researched perspective with structured formatting.
+
+Analyze the impact of artificial intelligence on healthcare in the next decade. Provide insights on AI-driven diagnostics, personalized medicine, robotic surgeries, and predictive analytics. Discuss benefits, risks, ethical concerns, and regulatory challenges. Use real-world examples to illustrate key points. Maintain an objective, well-researched perspective with structured formatting.
+ 
+Expected Output:
+A concise, informative analysis that balances technical details with accessibility, making it suitable for both experts and general readers."""
+
 prompt = "USER: " + prompt + "\n\nASSISTANT: "
+
+
+
 
 api_runner = ApiRunner(
     batch_size=1,
@@ -55,7 +74,7 @@ api_runner = ApiRunner(
     config=config,
     prompt=prompt,
     prompt_len=38,
-    ctx_len=65,
+    ctx_len=513,
 )
 
 # pytorch_hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)

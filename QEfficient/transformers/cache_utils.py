@@ -420,6 +420,7 @@ class HHCache(Cache):
                 invalid_idx_value = 0
 
             ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
+            #import ipdb; ipdb.set_trace()
             if batch_index is not None:
                 k_out = CtxGatherFuncCB.apply(k_out, batch_index, ctx_indices)
                 v_out = CtxGatherFuncCB.apply(v_out, batch_index, ctx_indices)
@@ -453,8 +454,8 @@ class HHCache(Cache):
             A tuple containing the updated key and value states.
         """
         position_ids = cache_kwargs.get("position_ids")
-        kv_seq_len = cache_kwargs.get("kv_seq_len")
-        
+        #kv_seq_len = cache_kwargs.get("kv_seq_len")
+        kv_seq_len = self.key_cache[layer_idx].shape[-2]
         if position_ids.max() >= kv_seq_len-1:
             print("Testing begins here")
 
@@ -485,12 +486,16 @@ class HHCache(Cache):
             invalid_idx_value = torch.iinfo(torch.int32).max
         else:
             invalid_idx_value = 0
-        read_indices_exp[:, -1] = invalid_idx_value
-        read_indices_for_gather = read_indices_exp.unsqueeze(-1).expand(-1, -1, 128).unsqueeze(0)
+        #  this is trivial optimization removing for now
+        read_indices_exp[:, -1] = 0
 
         ###########
         # where based H2O Magic
         ###########
+        
+        #import ipdb;ipdb.set_trace()
+        read_indices_for_gather = read_indices_exp.unsqueeze(-1).expand(-1, -1, 128).unsqueeze(0)
+        
         k_out = torch.where(
             position_ids.max() >= kv_seq_len-1,
             CtxGatherH2OFunc.apply(self.key_cache[layer_idx], read_indices_for_gather),

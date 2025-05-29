@@ -4,11 +4,13 @@ import onnxruntime
 import transformers
 
 model_name = "meta-llama/Llama-2-7b-chat-hf"
-n_layer = 1
+n_layer = 32
 tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 if tokenizer.pad_token_id is None:
     tokenizer.pad_token_id = tokenizer.eos_token_id
-prompt = "Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions."
+    
+prompt = "5 things to do in India?"
+#prompt = "Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions."
 prompt = "USER: " + prompt + "\n\nASSISTANT: "
 print("\n" + prompt, end="")
 
@@ -88,7 +90,7 @@ def run_kv_model_on_ort(model_path, n_layer=n_layer, ctx_len=65):
 
     print(ort_outputs.keys())
 
-    for i in range(1, 50):
+    for i in range(1, 100):
         generated_ids.append(ort_outputs["logits"].argmax(-1).reshape(-1, 1))
         # print(generated_ids[-1])
         inputs = update_ort_inputs(inputs, ort_outputs, n_layer)
@@ -103,5 +105,5 @@ def run_kv_model_on_ort(model_path, n_layer=n_layer, ctx_len=65):
     return generated_ids
 
 
-model_path = "/home/ubuntu/.cache/qeff_models/LlamaForCausalLM-6c541cf409be0bec/LlamaForCausalLM.onnx"
+model_path = "/home/mamtsing/.cache/qeff_models/LlamaForCausalLM-4400e2ebeb6e0c9f/LlamaForCausalLM.onnx"#"/home/ubuntu/.cache/qeff_models/LlamaForCausalLM-6c541cf409be0bec/LlamaForCausalLM.onnx"
 run_kv_model_on_ort(model_path, n_layer=n_layer, ctx_len=65)

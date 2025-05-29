@@ -143,8 +143,7 @@ class CtxGatherFunc(torch.autograd.Function):
 
 @onnxscript.script(onnxscript.values.Opset("com.qualcomm.cloud", 1))
 def CtxGatherH2O(data: onnxscript.FLOAT, read_indices: onnxscript.INT32) -> onnxscript.FLOAT:
-    return ops.GatherND(data, read_indices, batch_dims=2)
-
+    return ops.GatherElements(data, read_indices, axis=2) 
 
 class CtxGatherH2OFunc(torch.autograd.Function):
     """

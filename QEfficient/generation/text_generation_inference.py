@@ -980,6 +980,8 @@ class TextGeneration:
         decode_inputs = self._qaic_model.prepare_decode_inputs()
 
         loop_start = perf_counter()  # Start decode loop timer
+        
+        generation_len = 100
         num_token = self._qaic_model.run_decode(decode_inputs, generation_len, self._text_streamer)
         end = perf_counter()
         generated_texts = self._tokenizer.batch_decode(self._qaic_model.generated_ids, skip_special_tokens=True)
