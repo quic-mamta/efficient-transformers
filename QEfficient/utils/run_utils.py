@@ -120,6 +120,7 @@ class ApiRunner:
         print("Completion:", repr(generated_text))
         return generated_ids
 
+    @torch.no_grad()
     def run_kv_model_on_pytorch(self, model):
         """
         Function responsible for running KV ``PyTorch`` model and return the output tokens
@@ -133,13 +134,22 @@ class ApiRunner:
 
         generated_ids = []
         inputs = self.input_handler.prepare_pytorch_inputs()
-
+        
         pt_outputs = model(**inputs)
-        for _ in range(1, self.gen_len):
+        for cnt in range(1, self.gen_len):
             # generated_ids.append(pt_outputs["logits"].argmax(-1).reshape(-1, 1))
+            # import ipdb
+            # ipdb.set_trace()
+            
             generated_ids.append(pt_outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1))
             inputs = self.input_handler.update_pytorch_inputs(inputs, pt_outputs)
             pt_outputs = model(**inputs)
+            print(cnt, pt_outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1))
+            # if cnt>=25:
+           
+            print(pt_outputs['past_key_values'][0][0][0,0,:,:1].flatten())
+            # import ipdb
+            # ipdb.set_trace()
 
         # generated_ids.append(pt_outputs["logits"].argmax(-1).reshape(-1, 1))
         generated_ids.append(pt_outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1))

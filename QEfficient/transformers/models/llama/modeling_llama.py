@@ -46,12 +46,12 @@ class QEffLlamaRotaryEmbedding(LlamaRotaryEmbedding):
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
-
+        
         freqs = torch.outer(t, self.inv_freq)
 
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
@@ -59,8 +59,8 @@ class QEffLlamaRotaryEmbedding(LlamaRotaryEmbedding):
             self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
 
         return (
-            self.cos_cached[:seq_len].to(dtype=x.dtype) * self.attention_scaling,
-            self.sin_cached[:seq_len].to(dtype=x.dtype) * self.attention_scaling,
+            self.cos_cached[:seq_len] * self.attention_scaling,
+            self.sin_cached[:seq_len] * self.attention_scaling,
         )
 
 
@@ -87,12 +87,12 @@ def qeff_apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     """
     cos = cos[position_ids].unsqueeze(unsqueeze_dim)
     sin = sin[position_ids].unsqueeze(unsqueeze_dim)
-
+    
     # Apply rotation
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     # Cast back to original dtype
-    return q_embed.to(q.dtype), k_embed.to(k.dtype)
+    return q_embed, k_embed
 
 
 def eager_attention_forward(
@@ -155,6 +155,7 @@ class QEffLlamaAttention(LlamaAttention):
         position_ids = torch.where(cond, torch.tensor([[kv_seq_len - 1]]), position_ids)
 
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        
         query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
@@ -166,6 +167,10 @@ class QEffLlamaAttention(LlamaAttention):
                 "position_ids": position_ids,
                 "kv_seq_len": kv_seq_len,
             }
+            # if position_ids.max() >= 63:
+            # import ipdb
+            # ipdb.set_trace()
+
             key_states, value_states = past_key_value.update_kv(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)

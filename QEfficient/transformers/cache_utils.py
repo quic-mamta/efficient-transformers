@@ -486,17 +486,17 @@ class HHCache(Cache):
         # where based H2O Magic
         ###########
         k_out = torch.where(
-            position_ids.max() >= kv_seq_len,
+            position_ids.max() >= kv_seq_len-1,
             CtxGatherH2OFunc.apply(self.key_cache[layer_idx], read_indices_for_gather),
             self.key_cache[layer_idx],
         )
         v_out = torch.where(
-            position_ids.max() >= kv_seq_len,
+            position_ids.max() >= kv_seq_len-1,
             CtxGatherH2OFunc.apply(self.value_cache[layer_idx], read_indices_for_gather),
             self.value_cache[layer_idx],
         )
         attn_scores = torch.where(
-            position_ids.max() >= kv_seq_len,
+            position_ids.max() >= kv_seq_len-1,
             CtxGatherH2OFunc.apply(gathered_scores, read_indices_exp.unsqueeze(0)),
             gathered_scores,
         )

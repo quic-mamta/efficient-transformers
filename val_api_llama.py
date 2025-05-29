@@ -45,9 +45,7 @@ model_hf, _ = load_causal_lm_model(model_config)
 
 tokenizer = load_hf_tokenizer(pretrained_model_name_or_path=model_name)
 config = model_hf.config
-prompt = "Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions."
-prompt = "USER: " + prompt + "\n\nASSISTANT: "
-
+#prompt = "Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions."
 prompt = "5 things to do in India?"
 prompt = "USER: " + prompt + "\n\nASSISTANT: "
 
@@ -56,7 +54,7 @@ api_runner = ApiRunner(
     tokenizer=tokenizer,
     config=config,
     prompt=prompt,
-    prompt_len=32,
+    prompt_len=38,
     ctx_len=65,
 )
 

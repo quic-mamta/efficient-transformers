@@ -131,8 +131,8 @@ class InputHandler:
         inputs["input_ids"] = input_ids
         inputs["position_ids"] = position_ids
 
-        print("position_ids : ", position_ids)
-        print("input_ids : ", input_ids)
+        # print("position_ids : ", position_ids)
+        # print("input_ids : ", input_ids)
 
         inputs["past_key_values"] = tuple(past_key_values)
 
@@ -179,8 +179,8 @@ class InputHandler:
             [(key.detach(), value.detach()) for key, value in pt_outputs["past_key_values"]]
         )
         """
-        print("position_ids : ", updated_inputs["position_ids"])
-        print("input_ids : ", updated_inputs["input_ids"])
+        # print("position_ids : ", updated_inputs["position_ids"])
+        # print("input_ids : ", updated_inputs["input_ids"])
 
         return updated_inputs
 
