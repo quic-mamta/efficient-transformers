@@ -454,6 +454,10 @@ class HHCache(Cache):
         """
         position_ids = cache_kwargs.get("position_ids")
         kv_seq_len = cache_kwargs.get("kv_seq_len")
+        
+        if position_ids.max() >= kv_seq_len-1:
+            print("Testing begins here")
+
 
         attn_scores = attn_weights.sum(2)
 
@@ -464,6 +468,8 @@ class HHCache(Cache):
         )
 
         gathered_scores += attn_scores
+        
+        print("gathered score \n", gathered_scores[0][0])
 
         ######################
         # making read indices#
@@ -500,6 +506,8 @@ class HHCache(Cache):
             CtxGatherH2OFunc.apply(gathered_scores, read_indices_exp.unsqueeze(0)),
             gathered_scores,
         )
+        
+        attn_scores[:,:,-1] = torch.tensor(.0)
 
         # --------- scatter ------------- #
         bs = self.key_cache[layer_idx].shape[0]
