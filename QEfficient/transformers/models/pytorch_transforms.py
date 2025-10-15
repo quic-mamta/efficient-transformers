@@ -102,6 +102,11 @@ from transformers.models.mistral.modeling_mistral import (
     MistralModel,
     MistralRMSNorm,
 )
+from transformers.models.mistral3.modeling_mistral3 import (
+    Mistral3ForConditionalGeneration,
+    Mistral3Model,
+    Mistral3RMSNorm,
+)
 from transformers.models.mixtral.modeling_mixtral import (
     MixtralAttention,
     MixtralDecoderLayer,
@@ -124,6 +129,13 @@ from transformers.models.mllama.modeling_mllama import (
     MllamaVisionModel,
 )
 from transformers.models.mpt.modeling_mpt import MptAttention, MptBlock, MptForCausalLM, MptModel
+from transformers.models.olmo2.modeling_olmo2 import (
+    Olmo2Attention,
+    Olmo2DecoderLayer,
+    Olmo2ForCausalLM,
+    Olmo2Model,
+    Olmo2RMSNorm,
+)
 from transformers.models.phi.modeling_phi import PhiAttention, PhiDecoderLayer, PhiForCausalLM, PhiModel
 from transformers.models.phi3.modeling_phi3 import (
     Phi3Attention,
@@ -132,12 +144,20 @@ from transformers.models.phi3.modeling_phi3 import (
     Phi3Model,
     Phi3RMSNorm,
 )
+from transformers.models.pixtral.modeling_pixtral import PixtralRMSNorm, PixtralVisionModel
 from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2Attention,
     Qwen2DecoderLayer,
     Qwen2ForCausalLM,
     Qwen2Model,
     Qwen2RMSNorm,
+)
+from transformers.models.qwen3.modeling_qwen3 import (
+    Qwen3Attention,
+    Qwen3DecoderLayer,
+    Qwen3ForCausalLM,
+    Qwen3Model,
+    Qwen3RMSNorm,
 )
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeAttention,
@@ -274,6 +294,11 @@ from QEfficient.transformers.models.mistral.modeling_mistral import (
     QEffMistralForCausalLM,
     QEffMistralModel,
 )
+from QEfficient.transformers.models.mistral3.modeling_mistral3 import (
+    QEffMistral3ForConditionalGeneration,
+    QEffMistral3Model,
+    QEffPixtralVisionModel,
+)
 from QEfficient.transformers.models.mixtral_moe.modeling_mixtral import (
     QEffMixtralAttention,
     QeffMixtralDecoderLayer,
@@ -294,11 +319,24 @@ from QEfficient.transformers.models.mllama.modeling_mllama import (
     QEffMllamaTextSelfAttention,
     QEffMllamaVisionModel,
 )
+from QEfficient.transformers.models.molmo.modeling_molmo import (
+    QEffMolmo,
+    QEffMolmoBlock,
+    QEffMolmoModel,
+    QEffMolmoSequentialBlock,
+    QEffMultiHeadDotProductAttention,
+)
 from QEfficient.transformers.models.mpt.modeling_mpt import (
     QEffMptAttention,
     QEffMptBlock,
     QEffMptForCausalLM,
     QEFfMptModel,
+)
+from QEfficient.transformers.models.olmo2.modeling_olmo2 import (
+    QEffOlmo2Attention,
+    QEffOlmo2DecoderLayer,
+    QEffOlmo2ForCausalLM,
+    QEffOlmo2Model,
 )
 from QEfficient.transformers.models.phi.modeling_phi import (
     QEffPhiAttention,
@@ -317,6 +355,12 @@ from QEfficient.transformers.models.qwen2.modeling_qwen2 import (
     QEffQwen2DecoderLayer,
     QEffQwen2ForCausalLM,
     QEffQwen2Model,
+)
+from QEfficient.transformers.models.qwen3.modeling_qwen3 import (
+    QEffQwen3Attention,
+    QEffQwen3DecoderLayer,
+    QEffQwen3ForCausalLM,
+    QEffQwen3Model,
 )
 from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import (
     QEffQwen3MoeAttention,
@@ -355,14 +399,18 @@ class CustomOpsTransform(ModuleMappingTransform):
         LlamaRMSNorm: CustomRMSNormAIC,
         Llama4TextRMSNorm: CustomRMSNormAIC,
         MistralRMSNorm: CustomRMSNormAIC,
+        Mistral3RMSNorm: CustomRMSNormAIC,
         MixtralRMSNorm: CustomRMSNormAIC,
         Phi3RMSNorm: CustomRMSNormAIC,
         Qwen2RMSNorm: CustomRMSNormAIC,
+        Qwen3RMSNorm: CustomRMSNormAIC,
         MllamaTextRMSNorm: CustomRMSNormAIC,
         GraniteRMSNorm: CustomRMSNormAIC,
+        PixtralRMSNorm: CustomRMSNormAIC,
         GraniteMoeRMSNorm: CustomRMSNormAIC,
         Qwen3MoeRMSNorm: CustomRMSNormAIC,
         Gemma3RMSNorm: QEffGemma3CustomRMSNormAIC,
+        Olmo2RMSNorm: CustomRMSNormAIC,
     }
 
 
@@ -460,6 +508,9 @@ class KVCacheTransform(ModuleMappingTransform):
         MistralDecoderLayer: QEffMistralDecoderLayer,
         MistralModel: QEffMistralModel,
         MistralForCausalLM: QEffMistralForCausalLM,
+        # Mistral3
+        Mistral3ForConditionalGeneration: QEffMistral3ForConditionalGeneration,
+        Mistral3Model: QEffMistral3Model,
         # Mixtral
         MixtralAttention: QEffMixtralAttention,
         MixtralSparseMoeBlock: QEffMixtralSparseMoeBlock,
@@ -481,11 +532,18 @@ class KVCacheTransform(ModuleMappingTransform):
         PhiDecoderLayer: QEffPhiDecoderLayer,
         PhiModel: QEffPhiModel,
         PhiForCausalLM: QEffPhiForCausalLM,
+        # Pixtral
+        PixtralVisionModel: QEffPixtralVisionModel,
         # Qwen2
         Qwen2Attention: QEffQwen2Attention,
         Qwen2DecoderLayer: QEffQwen2DecoderLayer,
         Qwen2Model: QEffQwen2Model,
         Qwen2ForCausalLM: QEffQwen2ForCausalLM,
+        # Qwen3
+        Qwen3Attention: QEffQwen3Attention,
+        Qwen3DecoderLayer: QEffQwen3DecoderLayer,
+        Qwen3Model: QEffQwen3Model,
+        Qwen3ForCausalLM: QEffQwen3ForCausalLM,
         # Starcoder2
         Starcoder2Attention: QEffStarcoder2Attention,
         Starcoder2DecoderLayer: QEFFStarcoder2DecoderLayer,
@@ -496,6 +554,11 @@ class KVCacheTransform(ModuleMappingTransform):
         GPTBigCodeBlock: QEffGPTBigCodeBlock,
         GPTBigCodeModel: QEffGPTBigCodeModel,
         GPTBigCodeForCausalLM: QEffGPTBigCodeForCausalLM,
+        # Olmo2
+        Olmo2Attention: QEffOlmo2Attention,
+        Olmo2DecoderLayer: QEffOlmo2DecoderLayer,
+        Olmo2Model: QEffOlmo2Model,
+        Olmo2ForCausalLM: QEffOlmo2ForCausalLM,
         # Whisper encoder and decoder layers
         WhisperPositionalEmbedding: QEffWhisperPositionalEmbedding,
         WhisperAttention: QEffWhisperAttention,
@@ -532,6 +595,7 @@ class SpDTransform:
         # Llama
         QEffLlamaForCausalLM,
         QEffQwen2ForCausalLM,
+        QEffQwen3ForCausalLM,
     }
 
     @classmethod
@@ -629,6 +693,32 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
             "get_qeff_language_decoder": QEffInternVLModel.get_qeff_language_decoder,
         },
         "InternVisionEmbeddings": {"forward": QEffInternVisionEmbeddings.forward},
+        # Mapping for Molmo
+        "MolmoForCausalLM": {
+            "forward": QEffMolmoModel.forward,
+            "get_qeff_vision_encoder": QEffMolmoModel.get_qeff_vision_encoder,
+            "get_qeff_language_decoder": QEffMolmoModel.get_qeff_language_decoder,
+            "get_specializations": QEffMolmoModel.get_specializations,
+            "get_onnx_dynamic_axes": QEffMolmoModel.get_onnx_dynamic_axes,
+            "get_output_names": QEffMolmoModel.get_output_names,
+            "get_dummy_inputs": QEffMolmoModel.get_dummy_inputs,
+            "get_inputs_info": QEffMolmoModel.get_inputs_info,
+        },
+        "RMSLayerNorm": {"forward": CustomRMSNormAIC.forward},
+        # "MolmoForCausalLM": {"forward": QEffMolmoForCausalLM.forward},
+        "Molmo": {"forward": QEffMolmo.forward},
+        "MolmoSequentialBlock": {
+            "forward": QEffMolmoSequentialBlock.forward,
+            "attention": QEffMolmoBlock.attention,
+            "__qeff_init__": QEffMolmoBlock.__qeff_init__,
+        },
+        "MolmoBlock": {
+            "attention": QEffMolmoBlock.attention,
+            "__qeff_init__": QEffMolmoBlock.__qeff_init__,
+        },
+        "MultiHeadDotProductAttention": {
+            "forward": QEffMultiHeadDotProductAttention.forward,
+        },
         # Mapping for grok1 model
         "Grok1ModelForCausalLM": {"forward": QEffGrok1ModelForCausalLM.forward},
         "Grok1Model": {
