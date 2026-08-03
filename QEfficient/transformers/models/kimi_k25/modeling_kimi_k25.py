@@ -340,9 +340,15 @@ class QEffMoonViT3dEncoder(nn.Module):
 
         new_blocks = []
         for old_block in old_blocks:
-            new_block = MoonViTEncoderLayer(**self.block_cfg, use_deterministic_attn=False)
-            new_block.load_state_dict(old_block.state_dict())
-            new_blocks.append(new_block.to(device=old_block.wqkv.weight.device, dtype=old_block.wqkv.weight.dtype))
+            old_weight = old_block.wqkv.weight
+            if old_weight.is_meta:
+                with torch.device("meta"):
+                    new_block = MoonViTEncoderLayer(**self.block_cfg, use_deterministic_attn=False)
+                new_block.load_state_dict(old_block.state_dict(), assign=True)
+            else:
+                new_block = MoonViTEncoderLayer(**self.block_cfg, use_deterministic_attn=False)
+                new_block.load_state_dict(old_block.state_dict())
+            new_blocks.append(new_block.to(device=old_weight.device, dtype=old_weight.dtype))
         self.blocks = nn.ModuleList(new_blocks)
 
 

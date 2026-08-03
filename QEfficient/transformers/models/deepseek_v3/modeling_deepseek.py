@@ -855,6 +855,8 @@ class QEffDeepseekV3MoE(nn.Module):
     ):
         # Get common parameters from first expert
         first_expert = self.experts[0]
+        if not hasattr(first_expert.gate_proj, "qweight"):
+            return
         self.bits = first_expert.gate_proj.bits
         self.group_size = first_expert.gate_proj.group_size
         self.act_fn = first_expert.act_fn

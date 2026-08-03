@@ -87,6 +87,11 @@ def parse_args():
         action="store_true",
         help="Keep PyTorch weights resident after export instead of offloading them to meta tensors.",
     )
+    parser.add_argument(
+        "--use-weight-free-export",
+        action="store_true",
+        help="Export ONNX graphs without embedded weights and emit weight_spec.json metadata.",
+    )
     args = parser.parse_args()
     if (args.image_height is None) != (args.image_width is None):
         parser.error("--image-height and --image-width must be provided together.")
@@ -125,6 +130,11 @@ def configure_qaic_tool_path():
 
 def build_qeff_model(args):
     model_path = resolve_local_model_path(args.model_path)
+    subset_model_path = None
+    model_ref = model_path
+    if args.use_weight_free_export:
+        subset_model_path = args.export_dir.expanduser().resolve() / "kimi_k25_weightfree_subset"
+        model_ref = subset_model_path
     model, tokenizer, processor = load_kimi_k25_layer_subset_model(
         model_path=model_path,
         num_vision_layers=args.num_vision_layers,
@@ -133,10 +143,13 @@ def build_qeff_model(args):
         num_experts_per_tok=args.num_experts_per_token,
         dtype=torch.float32,
         seed=args.seed,
+        subset_model_path=subset_model_path,
     )
     model.eval()
     qaic_config = {"mla_absorption": {"cache_compressed": True, "absorption": False, "online": False}}
-    qeff_model = QEFFAutoModelForImageTextToText(model, qaic_config=qaic_config)
+    qeff_model = QEFFAutoModelForImageTextToText(
+        model, qaic_config=qaic_config, pretrained_model_name_or_path=str(model_ref)
+    )
     qeff_model.model.eval()
     qeff_model.vision_model.model.eval()
     qeff_model.lang_model.model.eval()
@@ -214,6 +227,7 @@ def export_vision(qeff_model, inputs, output_names, dynamic_axes, args):
         offload_pt_weights=False,
         dynamo=True,
         use_onnx_subfunctions=args.use_onnx_subfunctions,
+        use_weight_free_export=args.use_weight_free_export,
     )
 
 
@@ -227,80 +241,7 @@ def export_language(qeff_model, inputs, output_names, dynamic_axes, args):
         offload_pt_weights=not args.keep_weights,
         dynamo=True,
         use_onnx_subfunctions=args.use_onnx_subfunctions,
-    )
-    return onnx_path
-
-
-def get_component_export_args(qeff_model, prefill_seq_len: int):
-    inputs = qeff_model.model.get_dummy_inputs(
-        kv_offload=True,
-        continuous_batching=qeff_model.continuous_batching,
-        prefill_seq_len=prefill_seq_len,
-    )
-    normalize_nested_cache_inputs_for_dynamo(inputs)
-    dynamic_axes = qeff_model.model.get_onnx_dynamic_axes(
-        kv_offload=True,
-        continuous_batching=qeff_model.continuous_batching,
-        comp_ctx_lengths=qeff_model.comp_ctx_lengths_decode,
-    )
-    output_names = qeff_model.model.get_output_names(kv_offload=True)
-    add_static_dynamic_axes_for_dynamo(inputs, dynamic_axes)
-    remove_vision_output_dynamic_axes_for_dynamo(dynamic_axes)
-    freeze_batch_axes_for_dynamo(dynamic_axes)
-    return inputs, output_names, dynamic_axes
-
-
-def normalize_nested_cache_inputs_for_dynamo(inputs):
-    for component_inputs in inputs.values():
-        if "compressed_kvs" in component_inputs:
-            component_inputs["compressed_kvs"] = [tuple(layer) for layer in component_inputs["compressed_kvs"]]
-        if "past_key_values" in component_inputs:
-            component_inputs["past_key_values"] = [list(layer) for layer in component_inputs["past_key_values"]]
-
-
-def add_static_dynamic_axes_for_dynamo(inputs, dynamic_axes):
-    nested_cache_inputs = {"past_key_values", "compressed_kvs"}
-    for component_name, component_inputs in inputs.items():
-        component_dynamic_axes = dynamic_axes[component_name]
-        for input_name in component_inputs:
-            if input_name not in nested_cache_inputs:
-                component_dynamic_axes.setdefault(input_name, {})
-
-
-def remove_vision_output_dynamic_axes_for_dynamo(dynamic_axes):
-    dynamic_axes["vision"].pop("vision_embeds", None)
-
-
-def freeze_batch_axes_for_dynamo(dynamic_axes):
-    for component_dynamic_axes in dynamic_axes.values():
-        for axes_map in component_dynamic_axes.values():
-            for axis_idx, dim_name in tuple(axes_map.items()):
-                if dim_name in {"batch_size", "full_batch_size"}:
-                    axes_map.pop(axis_idx)
-
-
-def export_vision(qeff_model, inputs, output_names, dynamic_axes, args):
-    return qeff_model.vision_model._export(
-        inputs["vision"],
-        output_names=output_names["vision"],
-        dynamic_axes=dynamic_axes["vision"],
-        export_dir=args.export_dir,
-        offload_pt_weights=False,
-        dynamo=True,
-        use_onnx_subfunctions=args.use_onnx_subfunctions,
-    )
-
-
-def export_language(qeff_model, inputs, output_names, dynamic_axes, args):
-    qeff_model.lang_model.hash_params["prefill_only"] = False
-    onnx_path = qeff_model.lang_model._export(
-        inputs["lang"],
-        output_names=output_names["lang"],
-        dynamic_axes=dynamic_axes["lang"],
-        export_dir=args.export_dir,
-        offload_pt_weights=not args.keep_weights,
-        dynamo=True,
-        use_onnx_subfunctions=args.use_onnx_subfunctions,
+        use_weight_free_export=args.use_weight_free_export,
     )
     return onnx_path
 
@@ -353,6 +294,7 @@ def compile_components(qeff_model, exported_paths, image, qaic_config, args):
         mos=args.mos,
         image_height=image.height if image is not None else args.image_height,
         image_width=image.width if image is not None else args.image_width,
+        use_weight_free_export=args.use_weight_free_export,
     )
     return qpc_paths
 
