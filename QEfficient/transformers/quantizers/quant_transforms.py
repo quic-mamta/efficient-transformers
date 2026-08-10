@@ -118,6 +118,37 @@ class PackQuantizedInt4ToMatMulNBitsTransform(ModuleMutatorTransform):
     def mutate(cls, original_module, parent_module):
         # add compressor.decompress to get the decompressed weight
         # and then package into matmulnbit
+        quantization_args = original_module.quantization_scheme.weights
+        if getattr(original_module.weight_packed, "is_meta", False):
+            new_module = QuantLinearORT(
+                quantization_args.num_bits,
+                quantization_args.group_size,
+                original_module.in_features,
+                original_module.out_features,
+                original_module.bias is not None,
+            )
+            device = original_module.weight_packed.device
+            num_groups = original_module.in_features // quantization_args.group_size
+            qzeros_size = (num_groups + (num_groups & 1)) * (
+                original_module.out_features // 8 * quantization_args.num_bits
+            )
+            new_module.qweight = torch.empty(
+                original_module.out_features,
+                num_groups,
+                quantization_args.group_size // (8 // quantization_args.num_bits),
+                dtype=torch.uint8,
+                device=device,
+            )
+            new_module.scales = torch.empty(
+                num_groups * original_module.out_features, dtype=torch.float32, device=device
+            )
+            new_module.qzeros = torch.empty(qzeros_size, dtype=torch.uint8, device=device)
+            new_module.g_idx = torch.empty(original_module.in_features, dtype=torch.int32, device=device)
+            new_module.act_order = False
+            if original_module.bias is not None:
+                new_module.bias = torch.empty(original_module.out_features, dtype=torch.float16, device=device)
+            return new_module
+
         if isinstance(original_module, CompressedLinear):
             assert isinstance(original_module.compressor, PackedQuantizationCompressor), (
                 f"Only {PackedQuantizationCompressor} supported for now"
@@ -130,7 +161,6 @@ class PackQuantizedInt4ToMatMulNBitsTransform(ModuleMutatorTransform):
             fp_weight = original_module.weight
         scales = original_module.weight_scale
         # assuming symmetric quantization
-        quantization_args = original_module.quantization_scheme.weights
         zeros = (torch.zeros_like(scales) + pow(2, (quantization_args.num_bits - 1))).to(torch.uint8)
         g_idx = torch.arange(original_module.in_features // quantization_args.group_size).repeat_interleave(
             quantization_args.group_size

@@ -14,7 +14,7 @@ import subprocess
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Type, Union
 
 import onnx
 import torch
@@ -117,6 +117,7 @@ class QEFFBaseModel(ABC):
     _layerwise_active = False
     _pytorch_transforms: List[PytorchTransform]
     _onnx_transforms = [BaseOnnxTransform]
+    _checkpoint_transforms: List[Type] = []
 
     def _transform_names(self) -> List[str]:
         return [x.__name__ for x in self._pytorch_transforms + self._onnx_transforms]
@@ -157,6 +158,7 @@ class QEFFBaseModel(ABC):
         self.onnx_path: Optional[str] = None
         self.qpc_path: Optional[str] = None
         self.qpc_session: Optional[QAICInferenceSession] = None
+        self.weight_spec_path: Optional[str] = None
         self.model_architecture = (
             (arch := getattr(self.model.config, "architectures", None)) and len(arch) > 0 and arch[0]
         ) or None
@@ -385,15 +387,13 @@ class QEFFBaseModel(ABC):
         # which torch.export requires for dynamic_shapes to bind correctly.
         sig_keys = list(inspect.signature(self.model.forward).parameters.keys())
         sig_key_set = set(sig_keys)
-        ordered_inputs, ordered_shapes = {}, {}
+        ordered_inputs = {}
         for k in sig_keys:
             if k in example_inputs:
                 ordered_inputs[k] = example_inputs[k]
-            if dynamic_shapes is not None and k in dynamic_shapes:
-                ordered_shapes[k] = dynamic_shapes[k]
         example_inputs = {**ordered_inputs, **{k: v for k, v in example_inputs.items() if k not in sig_key_set}}
         if dynamic_shapes is not None:
-            dynamic_shapes = {**ordered_shapes, **{k: v for k, v in dynamic_shapes.items() if k not in sig_key_set}}
+            dynamic_shapes = {k: dynamic_shapes.get(k) for k in example_inputs}
 
         export_kwargs = dict(export_kwargs)
         export_kwargs.setdefault("report", False)
@@ -441,6 +441,7 @@ class QEFFBaseModel(ABC):
         prefill_only: Optional[bool] = False,
         dynamo: bool = False,
         dynamic_shapes: Optional[Dict[str, Dict[int, Any]]] = None,
+        use_weight_free_export: bool = False,
         **export_kwargs,
     ) -> str:
         """
@@ -473,14 +474,20 @@ class QEFFBaseModel(ABC):
         # TODO: Hack for retain_full_kv, handle this outside
         export_kwargs.pop("retain_full_kv", None)
         onnx_path = export_dir / f"{self.model_name}.onnx"
+        weight_spec_path = onnx_path.with_name("weight_spec.json")
 
         # Return early if ONNX already exists
         if onnx_path.is_file():
             self.onnx_path = onnx_path
+            self.weight_spec_path = str(weight_spec_path) if weight_spec_path.is_file() else None
             return onnx_path
 
+        if use_weight_free_export:
+            dynamo = True
+
         # check if the model is in meta state or weights are offloaded
-        self._model_offloaded_check()
+        if not use_weight_free_export:
+            self._model_offloaded_check()
 
         export_dir.mkdir(parents=True, exist_ok=True)
 
@@ -554,7 +561,20 @@ class QEFFBaseModel(ABC):
             input_names = aligned_input_names
 
         try:
-            if dynamo:
+            if use_weight_free_export:
+                from QEfficient.exporter.onnx_exporter import export_via_weightfree
+
+                export_result = export_via_weightfree(
+                    self,
+                    onnx_path,
+                    example_inputs,
+                    input_names,
+                    output_names,
+                    dynamic_shapes,
+                    export_kwargs,
+                    onnx_transform_kwargs,
+                )
+            elif dynamo:
                 self._export_via_dynamo(
                     onnx_path,
                     example_inputs,
@@ -563,6 +583,7 @@ class QEFFBaseModel(ABC):
                     dynamic_shapes,
                     export_kwargs,
                 )
+                export_result = None
             else:
                 self._export_via_legacy(
                     onnx_path,
@@ -572,12 +593,21 @@ class QEFFBaseModel(ABC):
                     dynamic_axes,
                     export_kwargs,
                 )
+                export_result = None
             logger.info("PyTorch export successful")
+            if export_result is not None:
+                self.weight_spec_path = str(export_result.weight_spec_path) if export_result.weight_spec_path else None
             self._offload_model_weights(offload_pt_weights)
-            model = onnx.load(onnx_path, load_external_data=False)
+            exported_onnx_path = export_result.onnx_path if export_result is not None else onnx_path
+            model = onnx.load(exported_onnx_path, load_external_data=False)
+
+            excluded_transforms = set(export_result.excluded_onnx_transforms) if export_result is not None else set()
+            active_transforms = [
+                transform for transform in self._onnx_transforms if transform not in excluded_transforms
+            ]
 
             needs_external_tensor_data = any(
-                transform in self._onnx_transforms for transform in (FP16ClipTransform, SplitTensorsTransform)
+                transform in active_transforms for transform in (FP16ClipTransform, SplitTensorsTransform)
             )
             transform_kwargs = {
                 "onnx_base_dir": str(export_dir) if needs_external_tensor_data else None,
@@ -587,8 +617,10 @@ class QEFFBaseModel(ABC):
             }
             if onnx_transform_kwargs is not None:
                 transform_kwargs.update(onnx_transform_kwargs)
+            if export_result is not None:
+                transform_kwargs.update(export_result.onnx_transform_kwargs)
 
-            onnx_transforms = OnnxTransformPipeline(transforms=self._onnx_transforms)
+            onnx_transforms = OnnxTransformPipeline(transforms=active_transforms)
             model, transformed = onnx_transforms.apply(model, **transform_kwargs)
 
             # Keep this strictly layerwise-scoped so regular non-layerwise export
@@ -597,9 +629,13 @@ class QEFFBaseModel(ABC):
                 _restore_retained_state_output_names(model, output_names)
 
             # Add metadata to the model
+            transform_names = [transform.__name__ for transform in self._pytorch_transforms + active_transforms]
             model.metadata_props.append(
-                onnx.StringStringEntryProto(key="qeff_transforms", value=",".join(self._transform_names()))
+                onnx.StringStringEntryProto(key="qeff_transforms", value=",".join(transform_names))
             )
+            if export_result is not None:
+                for hook in export_result.post_transform_hooks:
+                    hook(model)
             logger.info("ONNX transforms applied")
 
             onnx_path_tmp = onnx_path.with_suffix(onnx_path.suffix + ".tmp")
@@ -608,6 +644,10 @@ class QEFFBaseModel(ABC):
             del model
             gc.collect()
             logger.info("Transformed ONNX saved")
+
+            if export_result is not None:
+                for hook in export_result.post_export_hooks:
+                    hook()
 
         except Exception as e:
             logger.error(f"ONNX export or transforms failed: {e}")
@@ -628,6 +668,7 @@ class QEFFBaseModel(ABC):
         qaic_config: Optional[dict] = None,
         moe_prefill_packed_chunk_size: Optional[int] = None,
         kv_cache_prefix: Optional[str] = None,
+        use_weight_free_export: bool = False,
         **compiler_options,
     ):
         kwargs = {
@@ -635,6 +676,7 @@ class QEFFBaseModel(ABC):
             "use_onnx_subfunctions": use_onnx_subfunctions,
             "dynamo": dynamo,
             "retain_full_kv": retain_full_kv,
+            "use_weight_free_export": use_weight_free_export,
         }
         layerwise_cache_probe = compiler_options.pop("_layerwise_cache_probe", False)
         if layerwise_cache_probe:
@@ -973,6 +1015,7 @@ class QEFFBaseModel(ABC):
         qaic_config: Optional[dict] = None,
         specialization_module_name: Optional[str] = None,
         kv_cache_prefix: Optional[str] = None,
+        use_weight_free_export: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -1037,6 +1080,7 @@ class QEFFBaseModel(ABC):
                     moe_prefill_packed_chunk_size=moe_prefill_packed_chunk_size,
                     _layerwise_cache_probe=layerwise_cache_probe,
                     kv_cache_prefix=kv_cache_prefix,
+                    use_weight_free_export=use_weight_free_export,
                     **compiler_options,
                 )
         if QEFFBaseModel._layerwise_active:

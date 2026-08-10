@@ -40,6 +40,44 @@ from QEfficient.utils.torch_patches import (
 )
 
 
+def reorder_inputs_by_signature(model, example_inputs, dynamic_shapes=None):
+    """Reorder example inputs and dynamic shapes to match ``model.forward``."""
+    sig_keys = list(inspect.signature(model.forward).parameters.keys())
+    sig_key_set = set(sig_keys)
+    ordered_inputs = {}
+    for key in sig_keys:
+        if key in example_inputs:
+            ordered_inputs[key] = example_inputs[key]
+    reordered_inputs = {
+        **ordered_inputs,
+        **{key: value for key, value in example_inputs.items() if key not in sig_key_set},
+    }
+    if dynamic_shapes is None:
+        return reordered_inputs, None
+
+    reordered_shapes = {}
+    for key in reordered_inputs:
+        reordered_shapes[key] = dynamic_shapes.get(key)
+    return reordered_inputs, reordered_shapes
+
+
+def build_dynamo_export_kwargs(export_kwargs):
+    """Prepare ``torch.onnx.export`` kwargs for the dynamo exporter."""
+    from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
+    from QEfficient.utils import constants
+
+    kwargs = dict(export_kwargs)
+    kwargs.setdefault("report", False)
+    kwargs.setdefault("optimize", False)
+    kwargs["dynamo"] = True
+    kwargs["opset_version"] = constants.ONNX_DYNAMO_EXPORT_OPSET
+    kwargs["custom_translation_table"] = {
+        **(kwargs.pop("custom_translation_table", None) or {}),
+        **DYNAMO_CUSTOM_OP_TABLE,
+    }
+    return kwargs
+
+
 def convert_dynamic_axes_to_dynamic_shapes(
     dynamic_axes: Dict[str, Dict[int, str]],
     model_config=None,
@@ -71,7 +109,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
     max_seq_len = getattr(model_config, "max_position_embeddings", 1024)
     max_image_dim = max(max_seq_len, 65536)
     model_type = getattr(model_config, "model_type", None)
-    batch_min = 1 if model_type == "gpt_oss" else 2
+    batch_min = 1 if model_type in {"gpt_oss", "kimi_k25"} else 2
 
     dim_registry: Dict[str, Any] = {}
 
@@ -232,7 +270,9 @@ def export_wrapper(func):
 
     def wrapper(self, *args, **kwargs):
         # Extract flags
-        dynamo = kwargs.get("dynamo", False)
+        dynamo = kwargs.get("dynamo", False) or kwargs.get("use_weight_free_export", False)
+        if dynamo:
+            kwargs["dynamo"] = True
         use_onnx_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
 
         if dynamo:

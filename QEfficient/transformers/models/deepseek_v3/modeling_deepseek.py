@@ -1087,30 +1087,34 @@ class QEffDeepseekV3MoE(nn.Module):
         return final_out
 
     def moe_waa_unpack(self, hidden_states, topk_indices, topk_weights):
+        original_dtype = hidden_states.dtype
         gate_proj_unpacked = cast_to_uint4(self.all_gate_qweight)
         gate_zeros_unpacked = cast_to_uint4(self.all_gate_qzeros)
         gate_proj_dq = dequantize_linear(
-            gate_proj_unpacked, self.all_gate_scales, gate_zeros_unpacked, self.group_size
+            gate_proj_unpacked, self.all_gate_scales.to(hidden_states.dtype), gate_zeros_unpacked, self.group_size
         )
 
         up_proj_unpacked = cast_to_uint4(self.all_up_qweight)
         up_zeros_unpacked = cast_to_uint4(self.all_up_qzeros)
         up_proj_dq = dequantize_linear(
-            up_proj_unpacked, self.all_up_scales, up_zeros_unpacked, self.group_size
+            up_proj_unpacked, self.all_up_scales.to(hidden_states.dtype), up_zeros_unpacked, self.group_size
         )
 
         down_proj_unpacked = cast_to_uint4(self.all_down_qweight)
         down_zeros_unpacked = cast_to_uint4(self.all_down_qzeros)
         down_proj_dq = dequantize_linear(
-            down_proj_unpacked, self.all_down_scales, down_zeros_unpacked, self.group_size
+            down_proj_unpacked, self.all_down_scales.to(hidden_states.dtype), down_zeros_unpacked, self.group_size
         )
 
         num_experts = self.all_gate_qweight.shape[0]
-        expert_in = hidden_states.unsqueeze(0).expand(num_experts, -1, -1)
-        gate_out = torch.bmm(expert_in, gate_proj_dq.transpose(1, 2).to(expert_in.dtype))
-        up_out = torch.bmm(expert_in, up_proj_dq.transpose(1, 2).to(expert_in.dtype))
+        expert_in = hidden_states.to(gate_proj_dq.dtype).unsqueeze(0).expand(num_experts, -1, -1)
+        gate_proj_dq = gate_proj_dq.to(device=expert_in.device, dtype=expert_in.dtype)
+        up_proj_dq = up_proj_dq.to(device=expert_in.device, dtype=expert_in.dtype)
+        gate_out = torch.bmm(expert_in, gate_proj_dq.transpose(1, 2))
+        up_out = torch.bmm(expert_in, up_proj_dq.transpose(1, 2))
         hidden = self.act_fn(gate_out) * up_out
-        down_out = torch.bmm(hidden, down_proj_dq.transpose(1, 2).to(expert_in.dtype))
+        down_proj_dq = down_proj_dq.to(device=expert_in.device, dtype=expert_in.dtype)
+        down_out = torch.bmm(hidden, down_proj_dq.transpose(1, 2))
 
         routed_out = down_out.transpose(0, 1)
         selected_out = torch.gather(
@@ -1118,7 +1122,8 @@ class QEffDeepseekV3MoE(nn.Module):
             1,
             topk_indices.unsqueeze(-1).expand(-1, self.gate.top_k, self.out_features_down),
         )
-        return torch.einsum("abc,ab->ac", selected_out, topk_weights)
+        topk_weights = topk_weights.to(selected_out.dtype)
+        return torch.einsum("abc,ab->ac", selected_out, topk_weights).to(original_dtype)
 
     def forward(self, hidden_states):
         residuals = hidden_states
@@ -1630,8 +1635,10 @@ class QEffDeepseekV3Model(nn.Module):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        sin = self.sin_cached[position_ids].unsqueeze(1)
-        cos = self.cos_cached[position_ids].unsqueeze(1)
+        sin_cached = self.sin_cached.to(inputs_embeds.device)
+        cos_cached = self.cos_cached.to(inputs_embeds.device)
+        sin = sin_cached[position_ids].unsqueeze(1)
+        cos = cos_cached[position_ids].unsqueeze(1)
         num_q_ffn_blocks = getattr(self, "num_q_blocks_ffn", None)
         for decoder_layer in self.layers:
             if output_hidden_states:

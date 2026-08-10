@@ -6,6 +6,7 @@
 # ----------------------------------------------------------------------------
 
 import math
+from types import SimpleNamespace
 from typing import List, Optional, Tuple, Type, Union
 
 import torch
@@ -146,43 +147,38 @@ class Rope2DPosEmbRepeated(nn.Module):
         return f"dim={self.dim}, max_height={self.max_height}, max_width={self.max_width}, theta_base={self.theta_base}"
 
     def _ensure_precomputed_freqs(self, device: torch.device) -> None:
-        if not hasattr(self, "freqs_cis"):
-            self.register_buffer("freqs_cis", self._precompute_freqs_cis(device), persistent=False)
-        elif self.freqs_cis.device != device:
-            self.freqs_cis = self._precompute_freqs_cis(device)
+        if (
+            hasattr(self, "freqs_cos")
+            and hasattr(self, "freqs_sin")
+            and self.freqs_cos.device == device
+            and self.freqs_sin.device == device
+        ):
+            return
 
+        freqs_cos, freqs_sin = self._precompute_freqs_cos_sin(device)
         if not hasattr(self, "freqs_cos"):
-            self.register_buffer("freqs_cos", self.freqs_cis.real.contiguous(), persistent=False)
-        elif self.freqs_cos.device != device:
-            self.freqs_cos = self.freqs_cis.real.contiguous()
+            self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        else:
+            self.freqs_cos = freqs_cos
 
         if not hasattr(self, "freqs_sin"):
-            self.register_buffer("freqs_sin", self.freqs_cis.imag.contiguous(), persistent=False)
-        elif self.freqs_sin.device != device:
-            self.freqs_sin = self.freqs_cis.imag.contiguous()
+            self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        else:
+            self.freqs_sin = freqs_sin
 
-    def _precompute_freqs_cis(self, device: torch.device) -> torch.Tensor:
-        """Calculate the cis(freqs) for each position in the 2D grid.
-        Return: complex tensor of shape (max_height, max_width, dim//2) and value:
-            height axis: ret[h, w, 2*i] = cis(h * theta_base**(-4*i/dim))
-            weight axis: ret[h, w, 2*i+1] = cis(w * theta_base**(-4*i/dim))   with (i in [0, dim//4))
-            note: `cis` is a mathematical notation defined by cis x = cos x + i sin x,
-        """
-        N = self.max_height * self.max_width
-        flat_pos = torch.arange(0, N).float().to(device)
+    def _precompute_freqs_cos_sin(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Calculate cosine/sine rotary frequencies for each position in the 2D grid."""
+        num_positions = self.max_height * self.max_width
+        flat_pos = torch.arange(0, num_positions, device=device, dtype=torch.float32)
         x_pos = flat_pos % self.max_width
         y_pos = flat_pos // self.max_width
-        dim_range = torch.arange(0, self.dim, 4)[: (self.dim // 4)].float().to(device)  # C/4
+        dim_range = torch.arange(0, self.dim, 4, device=device, dtype=torch.float32)[: (self.dim // 4)]
         freqs = 1.0 / (self.theta_base ** (dim_range / self.dim))
-        x_freqs = torch.outer(x_pos, freqs).float()  # N, C/4
-        y_freqs = torch.outer(y_pos, freqs).float()  # N, C/4
-        x_cis = torch.polar(torch.ones_like(x_freqs), x_freqs)  # N, C/4
-        y_cis = torch.polar(torch.ones_like(y_freqs), y_freqs)  # N, C/4
-        # N, C/4, 2
-        freqs_cis = torch.cat([x_cis.unsqueeze(dim=-1), y_cis.unsqueeze(dim=-1)], dim=-1)
-        # max_height, max_width, C/2
-        freqs_cis = freqs_cis.reshape(self.max_height, self.max_width, -1)
-        return freqs_cis
+        x_freqs = torch.outer(x_pos, freqs).float()
+        y_freqs = torch.outer(y_pos, freqs).float()
+        freqs = torch.cat([x_freqs.unsqueeze(dim=-1), y_freqs.unsqueeze(dim=-1)], dim=-1)
+        freqs = freqs.reshape(self.max_height, self.max_width, -1)
+        return freqs.cos().contiguous(), freqs.sin().contiguous()
 
     def get_freqs_cis(self, grid_thws: torch.Tensor, device: torch.device) -> torch.Tensor:
         """
@@ -199,11 +195,15 @@ class Rope2DPosEmbRepeated(nn.Module):
             self.max_height,
             self.max_width,
         )
-        freqs_cis = torch.cat(
-            [self.freqs_cis[:h, :w].reshape(-1, self.dim // 2).repeat(t, 1) for t, h, w in shapes],
+        freqs_cos = torch.cat(
+            [self.freqs_cos[:h, :w].reshape(-1, self.dim // 2).repeat(t, 1) for t, h, w in shapes],
             dim=0,
         )
-        return freqs_cis
+        freqs_sin = torch.cat(
+            [self.freqs_sin[:h, :w].reshape(-1, self.dim // 2).repeat(t, 1) for t, h, w in shapes],
+            dim=0,
+        )
+        return torch.stack([freqs_cos, freqs_sin], dim=0)
 
 
 class MLP2(nn.Module):
@@ -340,9 +340,13 @@ class QEffMoonViT3dEncoder(nn.Module):
 
         new_blocks = []
         for old_block in old_blocks:
-            new_block = MoonViTEncoderLayer(**self.block_cfg, use_deterministic_attn=False)
-            new_block.load_state_dict(old_block.state_dict())
-            new_blocks.append(new_block.to(device=old_block.wqkv.weight.device, dtype=old_block.wqkv.weight.dtype))
+            block_device = old_block.wqkv.weight.device
+            block_dtype = old_block.wqkv.weight.dtype
+            with torch.device(block_device):
+                new_block = MoonViTEncoderLayer(**self.block_cfg, use_deterministic_attn=False)
+            if not old_block.wqkv.weight.is_meta:
+                new_block.load_state_dict(old_block.state_dict())
+            new_blocks.append(new_block.to(device=block_device, dtype=block_dtype))
         self.blocks = nn.ModuleList(new_blocks)
 
 
@@ -497,7 +501,8 @@ class QEffKimiK25DecoderWrapper(nn.Module):
                 if position_ids is None:
                     attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
                 else:
-                    attention_mask = (position_ids >= 0).to(dtype=torch.long, device=input_ids.device)
+                    position_zero = torch.zeros((), dtype=position_ids.dtype, device=position_ids.device)
+                    attention_mask = (position_ids >= position_zero).to(dtype=torch.long, device=input_ids.device)
             if image_idx is None:
                 image_idx = torch.zeros((input_ids.shape[0], 1), dtype=torch.int64, device=input_ids.device)
             selected = input_ids == self.config.media_placeholder_token_id
@@ -545,9 +550,11 @@ class QEffKimiK25DecoderWrapper(nn.Module):
 
         if position_ids is None and attention_mask is not None:
             position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids = torch.where(attention_mask > 0, position_ids, torch.full_like(position_ids, -1))
+            attention_zero = torch.zeros((), dtype=attention_mask.dtype, device=attention_mask.device)
+            position_ids = torch.where(attention_mask > attention_zero, position_ids, torch.full_like(position_ids, -1))
         elif position_ids is not None and attention_mask is not None:
-            position_ids = torch.where(attention_mask > 0, position_ids, torch.full_like(position_ids, -1))
+            attention_zero = torch.zeros((), dtype=attention_mask.dtype, device=attention_mask.device)
+            position_ids = torch.where(attention_mask > attention_zero, position_ids, torch.full_like(position_ids, -1))
 
         outputs = self.model.language_model(
             inputs_embeds=inputs_embeds,
@@ -584,6 +591,50 @@ class QEffKimiK25ForConditionalGeneration(nn.Module):
 
     def get_qeff_language_decoder(self):
         return QEffKimiK25DecoderWrapper(self)
+
+    def qeff_forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        h_shape: Optional[torch.Tensor] = None,
+        w_shape: Optional[torch.Tensor] = None,
+        vision_embeds: Optional[torch.FloatTensor] = None,
+        image_idx: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        compressed_kvs: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        batch_index: Optional[torch.LongTensor] = None,
+        comp_ctx_lengths: Optional[List[int]] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs,
+    ) -> Tuple:
+        if vision_embeds is None and pixel_values is not None:
+            if h_shape is None or w_shape is None:
+                raise ValueError("Kimi K2.5 QEff export requires h_shape and w_shape with pixel_values.")
+            encoder = SimpleNamespace(model=self, config=self.config)
+            vision_embeds = QEffKimiK25EncoderWrapper.forward(encoder, pixel_values, h_shape, w_shape)
+
+        decoder = SimpleNamespace(
+            model=self,
+            language_model=self.language_model,
+            lm_head=self.language_model.lm_head,
+            config=self.config,
+        )
+        return QEffKimiK25DecoderWrapper.forward(
+            decoder,
+            input_ids=input_ids,
+            vision_embeds=vision_embeds,
+            image_idx=image_idx,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            compressed_kvs=compressed_kvs,
+            past_key_values=past_key_values,
+            batch_index=batch_index,
+            comp_ctx_lengths=comp_ctx_lengths,
+            use_cache=use_cache,
+            **kwargs,
+        )
 
     def _qeff_merge_input_ids_with_image_features(
         self,
@@ -950,6 +1001,7 @@ class QEffKimiK25ForConditionalGeneration(nn.Module):
             dynamic_axes["lang"] = lang_dynamic_axes
         else:
             lang_dynamic_axes.pop("vision_embeds")
+            vision_dynamic_axes.pop("vision_embeds", None)
             dynamic_axes = {**vision_dynamic_axes, **lang_dynamic_axes}
         return dynamic_axes
 

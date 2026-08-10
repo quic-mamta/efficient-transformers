@@ -204,8 +204,8 @@ def _validate_layer_count(name, requested_count, available_count):
 
 def _validate_expert_subset(loaded_expert_ids, num_experts_per_tok, total_experts):
     expert_ids = tuple(loaded_expert_ids)
-    if len(expert_ids) != 4:
-        raise ValueError(f"Expected exactly 4 routed experts, got {expert_ids!r}.")
+    if not expert_ids:
+        raise ValueError("At least one routed expert id must be provided.")
     if len(set(expert_ids)) != len(expert_ids):
         raise ValueError(f"Expert ids must be unique, got {expert_ids!r}.")
     invalid_ids = [expert_id for expert_id in expert_ids if expert_id < 0 or expert_id >= total_experts]
