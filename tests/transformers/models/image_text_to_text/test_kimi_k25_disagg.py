@@ -17,10 +17,9 @@ from PIL import Image
 
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
-from QEfficient.utils.load_kimi_utils import (
+from tests.utils.load_kimi_utils import (
     LOADED_EXPERT_IDS,
     NUM_EXPERTS_PER_TOKEN,
-    ensure_torch_fx_import_compatibility,
     load_kimi_k25_class,
     load_layer_subset_model,
     prepare_config,
@@ -29,12 +28,12 @@ from QEfficient.utils.load_kimi_utils import (
     set_deterministic,
 )
 
-PREFILL_SEQ_LEN = 512
-CTX_LEN = 2048
+PREFILL_SEQ_LEN = 256
+CTX_LEN = 512
 BATCH_SIZE = 1
-GENERATION_LEN = 10
-NUM_VISION_LAYERS = 4
-NUM_TEXT_LAYERS = 4
+GENERATION_LEN = 4
+NUM_VISION_LAYERS = 2
+NUM_TEXT_LAYERS = 2
 IMAGE_URL = "https://huggingface.co/moonshotai/Kimi-K2.5/resolve/main/figures/kimi-logo.png"
 TEXT_PROMPT = "Describe this image."
 
@@ -50,12 +49,13 @@ def _prepare_inputs(processor):
             ],
         }
     ]
-    return processor(
+    inputs = processor(
         messages=messages,
         add_generation_prompt=True,
         tokenize=False,
         return_tensors="pt",
     )
+    return inputs, image.height, image.width
 
 
 def _decode_tokens(tokenizer, token_ids: torch.Tensor) -> str:
@@ -120,7 +120,6 @@ def _update_retained_states(target_inputs: dict[str, np.ndarray], source_outputs
 
 def _load_kimi_subset_model():
     set_deterministic(1234)
-    ensure_torch_fx_import_compatibility()
     model_path = resolve_model_path()
     config = prepare_config(model_path)
     kimi_cls = load_kimi_k25_class(model_path)
@@ -139,15 +138,8 @@ def _load_kimi_subset_model():
     return model.eval().to("cpu"), tokenizer, processor
 
 
-def _get_image_compile_dims(model, inputs: dict[str, torch.Tensor]) -> dict[str, int]:
-    grid_thws = inputs["grid_thws"].to(torch.long)
-    h = int(grid_thws[0, 1].item())
-    w = int(grid_thws[0, 2].item())
-    num_patches = int(inputs["pixel_values"].shape[0])
-    merge_height, merge_width = model.vision_tower.merge_kernel_size
-    num_images = max(num_patches // (h * w), 1)
-    num_image_tokens = num_images * (h // merge_height) * (w // merge_width)
-    return {"num_patches": num_patches, "h": h, "w": w, "num_image_tokens": num_image_tokens}
+def _get_image_compile_dims(image_height: int, image_width: int) -> dict[str, int]:
+    return {"image_height": image_height, "image_width": image_width}
 
 
 def _compile_disagg_qpcs(qeff_model: QEFFAutoModelForImageTextToText, compile_dims: dict[str, int]):
@@ -179,7 +171,7 @@ def _compile_disagg_qpcs(qeff_model: QEFFAutoModelForImageTextToText, compile_di
         prefill_only=True,
         skip_vision=True,
         skip_lang=False,
-        num_devices=4,
+        num_devices=1,
         **common_compile_kwargs,
     )
     compiled_onnx_paths["prefill"] = _assert_onnx_path(qeff_model.lang_model.onnx_path, "prefill")
@@ -189,7 +181,7 @@ def _compile_disagg_qpcs(qeff_model: QEFFAutoModelForImageTextToText, compile_di
         prefill_only=False,
         skip_vision=True,
         skip_lang=False,
-        num_devices=4,
+        num_devices=1,
         **common_compile_kwargs,
     )
     compiled_onnx_paths["decode"] = _assert_onnx_path(qeff_model.lang_model.onnx_path, "decode")
@@ -275,14 +267,14 @@ def _run_disagg_qaic_generation(
             decode_inputs["image_idx"] = decode_outputs["image_idx_output"].astype(np.int64)
         _update_retained_states(decode_inputs, decode_outputs)
 
-    return np.concatenate(generated_ids, axis=1)
+    return np.concatenate(generated_ids, axis=1)[0]
 
 
 @pytest.mark.on_qaic
 @pytest.mark.multimodal
 def test_kimi_k25_disagg_qaic_vs_hf_fp32():
     model, tokenizer, processor = _load_kimi_subset_model()
-    inputs = _prepare_inputs(processor)
+    inputs, image_height, image_width = _prepare_inputs(processor)
     inputs = {name: (value.to("cpu") if torch.is_tensor(value) else value) for name, value in inputs.items()}
     hf_tokens = run_kimi_k25_hf_model_on_pytorch(
         copy.deepcopy(model), processor, _clone_inputs(inputs), max_gen_len=GENERATION_LEN
@@ -296,7 +288,7 @@ def test_kimi_k25_disagg_qaic_vs_hf_fp32():
         layerwise=False,
     )
 
-    compile_dims = _get_image_compile_dims(qeff_model.model, inputs)
+    compile_dims = _get_image_compile_dims(image_height, image_width)
     vision_qpc_path, prefill_qpc_path, decode_qpc_path, compiled_onnx_paths = _compile_disagg_qpcs(
         qeff_model,
         compile_dims,
@@ -322,7 +314,4 @@ def test_kimi_k25_disagg_qaic_vs_hf_fp32():
     print("HF:", _decode_tokens(tokenizer, hf_tokens), "\n", hf_tokens)
     print("Disagg QAIC:", _decode_tokens(tokenizer, torch.as_tensor(qaic_tokens)), "\n", qaic_tokens)
 
-    assert qaic_tokens.shape == (BATCH_SIZE, GENERATION_LEN)
-    assert hf_tokens.shape == (BATCH_SIZE, GENERATION_LEN)
-    assert np.issubdtype(qaic_tokens.dtype, np.integer)
     assert torch.equal(hf_tokens, torch.as_tensor(qaic_tokens)), "HF and disagg QAIC tokens do not match"

@@ -37,10 +37,14 @@ from QEfficient.utils.run_utils import ApiRunnerInternVL, ApiRunnerMolmo, ApiRun
 from QEfficient.utils.test_utils import (
     InternProcessor,
     ModelConfig,
-    get_text_config,
     load_vlm_model,
     load_vlm_model_from_config,
     set_num_layers_vlm,
+)
+from tests.utils.load_kimi_utils import (
+    is_kimi_k25,
+    load_kimi_k25_layer_subset_model,
+    run_kimi_k25_hf_model_on_pytorch,
 )
 
 from ..check_model_results import dump_and_compare_results
@@ -105,10 +109,8 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
         )
         config = set_num_layers_vlm(config, n_layer=n_layer)
         if test_kv_replicate:
-            text_config = get_text_config(config)
-            num_replicate_kv_heads = text_config.num_attention_heads // text_config.num_key_value_heads
             qaic_config = qaic_config or {}
-            qaic_config["num_replicate_kv_heads"] = num_replicate_kv_heads
+            qaic_config["replicate_kv_heads"] = True
         if hasattr(config, "model_type") and config.model_type in ["gemma3"]:
             config.text_config._sliding_window_pattern = 2
             config.text_config.layer_types = ["sliding_attention", "full_attention"]
@@ -147,10 +149,8 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             )
     else:
         if test_kv_replicate:
-            text_config = get_text_config(config)
-            num_replicate_kv_heads = text_config.num_attention_heads // text_config.num_key_value_heads
             qaic_config = qaic_config or {}
-            qaic_config["num_replicate_kv_heads"] = num_replicate_kv_heads
+            qaic_config["replicate_kv_heads"] = True
         model_hf = load_vlm_model_from_config(config)
         qeff_model = QEFFAutoModelForImageTextToText(
             copy.deepcopy(model_hf),

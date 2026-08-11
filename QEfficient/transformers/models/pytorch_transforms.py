@@ -371,7 +371,7 @@ from QEfficient.transformers.models.gemma4.modeling_gemma4 import (
     QEffGemma4TextModel,
     QEffGemma4TextRouter,
     QEffGemma4VisionAttention,
-    QEffPrefillChunckedGemma4TextExperts,
+    QEffPrefillChunkedGemma4TextExperts,
 )
 from QEfficient.transformers.models.glm4_moe.modeling_glm4_moe import (
     QEffGlm4MoeAttention,
@@ -972,7 +972,7 @@ class PrefillOnlyChunkedTransform(ModuleMappingTransform):
         # Qwen3_5Moe
         QEffQwen3_5MoeSparseMoeBlock: QEffPrefillChunkedQwen3_5MoeSparseMoeBlock,
         # Gemma4_Moe
-        QEffGemma4TextExperts: QEffPrefillChunckedGemma4TextExperts,
+        QEffGemma4TextExperts: QEffPrefillChunkedGemma4TextExperts,
     }
 
 
@@ -993,7 +993,7 @@ class RevertPrefillKeepAttentionTransform(ModuleMappingTransform):
         # Qwen3_5Moe
         QEffPrefillChunkedQwen3_5MoeSparseMoeBlock: QEffQwen3_5MoeSparseMoeBlock,
         # Gemma4_Moe
-        QEffPrefillChunckedGemma4TextExperts: QEffGemma4TextExperts,
+        QEffPrefillChunkedGemma4TextExperts: QEffGemma4TextExperts,
     }
 
 
@@ -1377,6 +1377,7 @@ class PrefillOnlyExternalModuleMapperTransform(ExternalModuleMapperTransform):
             "__qeff_init__": QEffPrefillOnlyDeepseekV3MoE.__qeff_init__,
             "_forward_expert_blocked": QEffPrefillOnlyDeepseekV3MoE._forward_expert_blocked,
             "_cumsum_scatter_gather_update_expert_blocked": QEffPrefillOnlyDeepseekV3MoE._cumsum_scatter_gather_update_expert_blocked,
+            "supports_moe_prefill_blocking": QEffPrefillOnlyDeepseekV3MoE.supports_moe_prefill_blocking,
         },
     }
 
