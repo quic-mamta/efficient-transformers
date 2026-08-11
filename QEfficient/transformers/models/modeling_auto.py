@@ -32,6 +32,13 @@ import QEfficient
 from QEfficient.base.modeling_qeff import QEFFBaseModel
 from QEfficient.base.onnx_transforms import FP16ClipTransform, SplitTensorsTransform
 from QEfficient.base.pytorch_transforms import SplitGateUpWeightsTransform
+from QEfficient.exporter.weight_free.checkpoint_transforms import (
+    DtypeConversionCheckpointTransform,
+    GptOssMxfp4ExpertDequantSplitCheckpointTransform,
+    KimiK25PackQuantizedExpertsCheckpointTransform,
+    MoEExpertStackingCheckpointTransform,
+    MoEFusedExpertSplitCheckpointTransform,
+)
 from QEfficient.generation.cloud_infer import QAICInferenceSession, is_retained_state_name
 from QEfficient.generation.text_generation_inference import (
     CloudAI100ExecInfoNew,
@@ -194,6 +201,94 @@ def _build_meta_model(hf_auto_class, pretrained_model_name_or_path, kwargs):
     with torch.device("meta"):
         model = hf_auto_class.from_config(config, torch_dtype=torch_dtype)
     return model
+
+
+def _coerce_bfloat16_config_to_float16(config):
+    """Mirror QEff runtime behavior for config-only Kimi construction."""
+    for cfg in (
+        config,
+        getattr(config, "text_config", None),
+        getattr(config, "vision_config", None),
+    ):
+        if cfg is None:
+            continue
+        if getattr(cfg, "torch_dtype", None) == torch.bfloat16:
+            cfg.torch_dtype = torch.float16
+        if getattr(cfg, "dtype", None) == torch.bfloat16:
+            cfg.dtype = torch.float16
+
+
+def _build_kimi_k25_config_model(pretrained_model_name_or_path, kwargs):
+    """Construct Kimi K2.5 from config only for weight-free export."""
+    from accelerate import init_empty_weights
+
+    from QEfficient.transformers.quantizers.auto import (
+        QEFF_AUTO_QUANTIZER_MAPPING,
+        QEFF_AUTO_QUANTIZATION_CONFIG_MAPPING,
+    )
+    from QEfficient.utils.load_kimi_utils import load_kimi_k25_class, prepare_config
+
+    config = kwargs.get("config")
+    if config is None:
+        config = prepare_config(Path(pretrained_model_name_or_path))
+        kwargs["config"] = config
+    else:
+        config._attn_implementation = "eager"
+        if hasattr(config, "text_config"):
+            config.text_config._attn_implementation = "eager"
+        if hasattr(config, "vision_config"):
+            config.vision_config._attn_implementation = "eager"
+
+    _coerce_bfloat16_config_to_float16(config)
+
+    remote_code_ref = getattr(config, "_name_or_path", None) or pretrained_model_name_or_path
+    remote_code_path = Path(remote_code_ref).expanduser() if isinstance(remote_code_ref, str) else None
+    if remote_code_path is not None and remote_code_path.exists() and not (remote_code_path / "modeling_kimi_k25.py").exists():
+        remote_code_ref = pretrained_model_name_or_path
+
+    kimi_cls = load_kimi_k25_class(remote_code_ref)
+    quant_config = getattr(config, "quantization_config", None)
+    if isinstance(quant_config, dict):
+        quant_type = quant_config.get("quant_method") or quant_config.get("quant_type")
+        config_cls = QEFF_AUTO_QUANTIZATION_CONFIG_MAPPING.get(quant_type)
+        if config_cls is not None:
+            quant_config = config_cls(**{key: value for key, value in quant_config.items() if key != "quant_method"})
+            config.quantization_config = quant_config
+            if hasattr(config, "text_config"):
+                config.text_config.quantization_config = quant_config
+
+    with init_empty_weights():
+        from_config = getattr(kimi_cls, "from_config", None) or kimi_cls._from_config
+        model = from_config(config)
+        if quant_config is not None:
+            quant_method = getattr(quant_config, "quant_method", None) or getattr(quant_config, "quant_type", None)
+            quant_type = quant_method.value if hasattr(quant_method, "value") else quant_method
+            quantizer_cls = QEFF_AUTO_QUANTIZER_MAPPING.get(quant_type)
+            if quantizer_cls is not None:
+                quantizer_cls(quant_config)._process_model_before_weight_loading(model)
+    return model
+
+
+def _build_image_text_weight_free_config_model(pretrained_model_name_or_path, kwargs):
+    """Construct an image-text-to-text model from config only for weight-free export."""
+    from transformers import AutoConfig
+
+    config = kwargs.get("config")
+    if config is None:
+        config_kwargs = {
+            key: kwargs[key]
+            for key in ("trust_remote_code", "revision", "token", "subfolder", "cache_dir")
+            if key in kwargs
+        }
+        config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **config_kwargs)
+        kwargs["config"] = config
+
+    if getattr(config, "model_type", None) == "kimi_k25":
+        return _build_kimi_k25_config_model(pretrained_model_name_or_path, kwargs)
+
+    raise NotImplementedError(
+        "QEFFAutoModelForImageTextToText weight-free config loading is currently supported for Kimi K2.5."
+    )
 
 
 def _compile_io_name(name: str, *, use_onnx_subfunctions: bool) -> str:
@@ -1078,6 +1173,14 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
         KVCacheExternalModuleMapperTransform,
     ]
     _onnx_transforms = []
+    _hf_auto_class = AutoModelForImageTextToText
+    _checkpoint_transforms = [
+        KimiK25PackQuantizedExpertsCheckpointTransform,
+        GptOssMxfp4ExpertDequantSplitCheckpointTransform,
+        MoEExpertStackingCheckpointTransform,
+        MoEFusedExpertSplitCheckpointTransform,
+        DtypeConversionCheckpointTransform,
+    ]
 
     def __init__(self, model: nn.modules, **kwargs):
         """
@@ -1126,6 +1229,7 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
             export_dir=export_dir,
             offload_pt_weights=offload_pt_weights,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+            use_weight_free_export=kwargs.get("use_weight_free_export", False),
         )
 
     def compile(
@@ -1216,6 +1320,14 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         SplitGateUpWeightsTransform,
     ]
     _onnx_transforms = []
+    _hf_auto_class = AutoModelForImageTextToText
+    _checkpoint_transforms = [
+        KimiK25PackQuantizedExpertsCheckpointTransform,
+        GptOssMxfp4ExpertDequantSplitCheckpointTransform,
+        MoEExpertStackingCheckpointTransform,
+        MoEFusedExpertSplitCheckpointTransform,
+        DtypeConversionCheckpointTransform,
+    ]
 
     def __init__(self, model, qaic_config: Optional[dict] = None, **kwargs):
         """
@@ -1328,6 +1440,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 export_dir=export_dir,
                 offload_pt_weights=offload_pt_weights,
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+                use_weight_free_export=kwargs.get("use_weight_free_export", False),
             )
 
     def compile(
@@ -1472,6 +1585,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             An instance initialized with the pretrained weights.
         """
         enable_proxy = kwargs.pop("enable_proxy", False)
+        use_weight_free_export = kwargs.pop("use_weight_free_export", False)
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
@@ -1489,16 +1603,22 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         )
 
         _resolve_torch_dtype(kwargs)
-        model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        if use_weight_free_export:
+            model = _build_image_text_weight_free_config_model(pretrained_model_name_or_path, kwargs)
+        else:
+            model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
 
-        return cls(
+        instance = cls(
             model,
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             qaic_config=qaic_config,
             **kwargs,
         )
+        if use_weight_free_export:
+            instance._weight_free_config_only = True
+        return instance
 
     @property
     def onnx_path(self):
@@ -1547,6 +1667,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         layerwise_window_size: int = 1,
         kv_cache_prefix: Optional[str] = None,
         offload_pt_weights: Optional[bool] = None,
+        use_weight_free_export: bool = False,
         **kwargs,
     ) -> str:
         """
@@ -1570,6 +1691,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             A list containing the paths to the generated ONNX graph files for both components.
         """
         layerwise_cache_probe = kwargs.pop("_layerwise_cache_probe", False)
+        if use_weight_free_export and layerwise:
+            raise NotImplementedError("Weight-free image-text export uses dual-QPC dynamo export, not layerwise export.")
+        if use_weight_free_export and self.continuous_batching:
+            raise NotImplementedError("Weight-free image-text export does not support continuous batching yet.")
         if layerwise:
             return self._run_layerwise_export(
                 export_dir=export_dir,
@@ -1662,6 +1787,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 export_dir=export_dir,
                 offload_pt_weights=False,
                 use_onnx_subfunctions=use_onnx_subfunctions,
+                use_weight_free_export=use_weight_free_export,
             )
 
         # TODO: remove the current pt weight offload capability once CustomLoader is in place
@@ -1686,6 +1812,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 prefill_seq_len=prefill_seq_len,
                 _layerwise_cache_probe=layerwise_cache_probe,
                 kv_cache_prefix=kv_cache_prefix,
+                use_weight_free_export=use_weight_free_export,
             )
         return self.onnx_path
 
@@ -1871,6 +1998,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         layerwise_window_size: int = 1,
         kv_cache_prefix: Optional[str] = None,
         moe_prefill_packed_chunk_size: int = constants.MOE_PREFILL_PACKED_CHUNK_SIZE,
+        use_weight_free_export: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -2081,6 +2209,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 _layerwise_cache_probe=layerwise_cache_probe,
                 kv_cache_prefix=kv_cache_prefix,
                 offload_pt_weights=offload_pt_weights,
+                use_weight_free_export=use_weight_free_export,
             )
             if layerwise_cache_probe:
                 return self.lang_model.onnx_path
@@ -3371,10 +3500,16 @@ class QEFFAutoModelForImageTextToText:
             If `continuous_batching` is provided as True.
         """
         enable_proxy = kwargs.pop("enable_proxy", False)
+        use_weight_free_export = kwargs.pop("use_weight_free_export", False)
+
+        if use_weight_free_export:
+            kv_offload = True
 
         # TODO: add a check to see if kv_offload is allowed for given model by loading the config and checking architecture or type of config here.
         if continuous_batching and not kv_offload:
             NotImplementedError("Continuous batching is not supported for kv_offload = False")
+        if use_weight_free_export and continuous_batching:
+            raise NotImplementedError("Weight-free image-text export supports dual QPC only and no continuous batching yet.")
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
@@ -3391,7 +3526,9 @@ class QEFFAutoModelForImageTextToText:
         )
 
         _resolve_torch_dtype(kwargs)
-        if layerwise:
+        if use_weight_free_export:
+            model = _build_image_text_weight_free_config_model(pretrained_model_name_or_path, kwargs)
+        elif layerwise:
             # Layer-wise mode: build the outer model on the meta device so the
             # caller's ``from_pretrained`` does not pull the full checkpoint
             # into RAM. compile()/export() rebuilds a real per-window model
@@ -3416,6 +3553,58 @@ class QEFFAutoModelForImageTextToText:
         # other way) and so the driver knows weights still need to be loaded.
         if layerwise:
             instance._layerwise_outer_meta = True
+        if use_weight_free_export:
+            instance._weight_free_config_only = True
+        return instance
+
+    @classmethod
+    @with_replaced_quantizers
+    def from_config(
+        cls,
+        config,
+        pretrained_model_name_or_path: str,
+        kv_offload: Optional[bool] = True,
+        continuous_batching: bool = False,
+        qaic_config: Optional[dict] = None,
+        use_weight_free_export: bool = True,
+        **kwargs,
+    ):
+        """Build an image-text model from config only.
+
+        ``pretrained_model_name_or_path`` is kept as checkpoint metadata for
+        weight-free export; checkpoint tensors are not loaded into the module.
+        """
+        enable_proxy = kwargs.pop("enable_proxy", False)
+        kwargs["config"] = config
+
+        if use_weight_free_export:
+            kv_offload = True
+        if continuous_batching and not kv_offload:
+            raise NotImplementedError("Continuous batching is not supported for kv_offload=False")
+        if use_weight_free_export and continuous_batching:
+            raise NotImplementedError("Weight-free image-text export supports dual QPC only and no continuous batching yet.")
+
+        if kwargs.get("attn_implementation", None) not in {None, "eager"}:
+            logger.warning('Updating attn_implementation="eager"')
+        kwargs["attn_implementation"] = "eager"
+        _resolve_torch_dtype(kwargs)
+
+        if use_weight_free_export:
+            model = _build_image_text_weight_free_config_model(pretrained_model_name_or_path, kwargs)
+        else:
+            model = cls._hf_auto_class.from_config(config, attn_implementation="eager")
+
+        kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        instance = cls(
+            model,
+            kv_offload=kv_offload,
+            continuous_batching=continuous_batching,
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            qaic_config=qaic_config,
+            **kwargs,
+        )
+        if use_weight_free_export:
+            instance._weight_free_config_only = True
         return instance
 
 
@@ -3460,6 +3649,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
     ]
 
     _onnx_transforms = []
+
+    _checkpoint_transforms = [
+        KimiK25PackQuantizedExpertsCheckpointTransform,
+        GptOssMxfp4ExpertDequantSplitCheckpointTransform,
+        MoEExpertStackingCheckpointTransform,
+        MoEFusedExpertSplitCheckpointTransform,
+        DtypeConversionCheckpointTransform,
+    ]
 
     def prefill(
         self,
@@ -3668,6 +3865,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         _resolve_torch_dtype(kwargs)
         if layerwise:
+            warnings.warn(
+                "layerwise export is deprecated and will be removed in a future release. "
+                "Use weight-free export (use_weight_free_export=True) instead, which provides "
+                "the same memory benefit without the complexity of per-window re-export.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             # Layer-wise mode: build the outer model on the meta device. The
             # caller still gets a typed wrapper, but no checkpoint weights are
             # pulled into RAM. compile()/export() rebuilds a real per-window
@@ -3821,6 +4025,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         layerwise_window_size: int = 1,
         kv_cache_prefix: Optional[str] = None,
         dynamo: bool = False,
+        use_weight_free_export: bool = False,
         **kwargs,
     ) -> str:
         """
@@ -3851,6 +4056,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
 
         if layerwise:
+            warnings.warn(
+                "layerwise export is deprecated and will be removed in a future release. "
+                "Use weight-free export (use_weight_free_export=True) instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             return self._run_layerwise(
                 final_compile=False,
                 layerwise_window_size=layerwise_window_size,
@@ -3875,7 +4086,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             block_size = -(-seq_len // max_blocks)
             seq_len = block_size * max_blocks
         fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
-        if dynamo and not (
+        # weight-free export internally uses dynamo; auto-enable it so callers
+        # don't have to pass both flags and the guard in _export() is satisfied.
+        if use_weight_free_export:
+            dynamo = True
+        if (dynamo or use_weight_free_export) and not (
             getattr(self.model.config, "model_type", None) == "gpt_oss" and not self.continuous_batching
         ):
             # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
@@ -3883,7 +4098,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         kv_cache_shape = get_padding_shape_from_config(
             self.model.config, fbs if self.continuous_batching else bs, seq_len
         )
-        if dynamo:
+        if dynamo or use_weight_free_export:
             kv_cache_shape = list(kv_cache_shape)
             kv_cache_shape[1 if len(kv_cache_shape) == 3 else 2] = max(
                 2, kv_cache_shape[1 if len(kv_cache_shape) == 3 else 2]
@@ -4148,6 +4363,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 dynamo=dynamo,
                 offload_pt_weights=kwargs.get("offload_pt_weights", True),
                 prefill_only=prefill_only,
+                use_weight_free_export=use_weight_free_export,
             )
 
     def build_prefill_specialization(
@@ -4393,6 +4609,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         """
         if layerwise:
+            warnings.warn(
+                "layerwise export is deprecated and will be removed in a future release. "
+                "Use weight-free export (use_weight_free_export=True) instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             return self._run_layerwise(
                 final_compile=True,
                 layerwise_window_size=layerwise_window_size,
