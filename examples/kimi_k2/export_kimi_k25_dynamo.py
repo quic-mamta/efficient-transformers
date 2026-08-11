@@ -1,3 +1,10 @@
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
 """Export, compile, and generate with a reduced Kimi K2.5 model slice.
 
 The ONNX export step uses the Dynamo path directly on the dual-QPC component
@@ -155,80 +162,6 @@ def build_qeff_model(args):
 def precompute_vision_rope_cache(qeff_model):
     rope_2d = qeff_model.vision_model.model.model.vision_tower.encoder.rope_2d
     rope_2d._ensure_precomputed_freqs(torch.device("cpu"))
-
-
-def get_component_export_args(qeff_model, prefill_seq_len: int):
-    inputs = qeff_model.model.get_dummy_inputs(
-        kv_offload=True,
-        continuous_batching=qeff_model.continuous_batching,
-        prefill_seq_len=prefill_seq_len,
-    )
-    normalize_nested_cache_inputs_for_dynamo(inputs)
-    dynamic_axes = qeff_model.model.get_onnx_dynamic_axes(
-        kv_offload=True,
-        continuous_batching=qeff_model.continuous_batching,
-        comp_ctx_lengths=qeff_model.comp_ctx_lengths_decode,
-    )
-    output_names = qeff_model.model.get_output_names(kv_offload=True)
-    add_static_dynamic_axes_for_dynamo(inputs, dynamic_axes)
-    remove_vision_output_dynamic_axes_for_dynamo(dynamic_axes)
-    freeze_batch_axes_for_dynamo(dynamic_axes)
-    return inputs, output_names, dynamic_axes
-
-
-def normalize_nested_cache_inputs_for_dynamo(inputs):
-    for component_inputs in inputs.values():
-        if "compressed_kvs" in component_inputs:
-            component_inputs["compressed_kvs"] = [tuple(layer) for layer in component_inputs["compressed_kvs"]]
-        if "past_key_values" in component_inputs:
-            component_inputs["past_key_values"] = [list(layer) for layer in component_inputs["past_key_values"]]
-
-
-def add_static_dynamic_axes_for_dynamo(inputs, dynamic_axes):
-    nested_cache_inputs = {"past_key_values", "compressed_kvs"}
-    for component_name, component_inputs in inputs.items():
-        component_dynamic_axes = dynamic_axes[component_name]
-        for input_name in component_inputs:
-            if input_name not in nested_cache_inputs:
-                component_dynamic_axes.setdefault(input_name, {})
-
-
-def remove_vision_output_dynamic_axes_for_dynamo(dynamic_axes):
-    dynamic_axes["vision"].pop("vision_embeds", None)
-
-
-def freeze_batch_axes_for_dynamo(dynamic_axes):
-    for component_dynamic_axes in dynamic_axes.values():
-        for axes_map in component_dynamic_axes.values():
-            for axis_idx, dim_name in tuple(axes_map.items()):
-                if dim_name in {"batch_size", "full_batch_size"}:
-                    axes_map.pop(axis_idx)
-
-
-def export_vision(qeff_model, inputs, output_names, dynamic_axes, args):
-    return qeff_model.vision_model._export(
-        inputs["vision"],
-        output_names=output_names["vision"],
-        dynamic_axes=dynamic_axes["vision"],
-        export_dir=args.export_dir,
-        offload_pt_weights=False,
-        dynamo=True,
-        use_onnx_subfunctions=args.use_onnx_subfunctions,
-    )
-
-
-def export_language(qeff_model, inputs, output_names, dynamic_axes, args):
-    qeff_model.lang_model.hash_params["prefill_only"] = False
-    onnx_path = qeff_model.lang_model._export(
-        inputs["lang"],
-        output_names=output_names["lang"],
-        dynamic_axes=dynamic_axes["lang"],
-        export_dir=args.export_dir,
-        offload_pt_weights=not args.keep_weights,
-        dynamo=True,
-        use_onnx_subfunctions=args.use_onnx_subfunctions,
-    )
-    return onnx_path
 
 
 def get_component_export_args(qeff_model, prefill_seq_len: int):

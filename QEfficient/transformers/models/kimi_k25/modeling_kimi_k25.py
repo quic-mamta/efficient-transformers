@@ -527,7 +527,17 @@ class QEffKimiK25DecoderWrapper(nn.Module):
             default_image_idx = torch.clamp(merged_image_tokens - 1, min=0)
             input_batch = torch.full((1, 1), input_ids.shape[0], device=image_idx.device, dtype=torch.int64)
             image_idx_batch = torch.full((1, 1), image_idx.shape[0], device=image_idx.device, dtype=torch.int64)
-            use_default_image_idx = torch.logical_and(torch.logical_not(selected_any), input_batch != image_idx_batch)
+            if position_ids is None:
+                post_media_position = torch.zeros_like(image_idx, dtype=torch.bool)
+            else:
+                post_media_position = position_ids[:, :1].to(device=image_idx.device) >= torch.full_like(image_idx, 7)
+            use_default_image_idx = torch.logical_and(
+                torch.logical_not(selected_any),
+                torch.logical_or(
+                    input_batch != image_idx_batch,
+                    torch.logical_and(post_media_position, image_idx < default_image_idx),
+                ),
+            )
             effective_image_idx = torch.where(use_default_image_idx, default_image_idx, image_idx)
             if position_ids is None:
                 position_ids = merged_position_ids
@@ -602,9 +612,7 @@ class QEffKimiK25ForConditionalGeneration(nn.Module):
 
         target_device = inputs_embeds.device
         image_features = image_features.to(target_device)
-        num_image_tokens = torch.full(
-            (1, 1), image_features.shape[0], device=input_ids.device, dtype=input_ids.dtype
-        )
+        num_image_tokens = torch.full((1, 1), image_features.shape[0], device=input_ids.device, dtype=input_ids.dtype)
 
         image_token_mask = input_ids == image_token_index
         non_image_mask = ~image_token_mask
@@ -631,9 +639,7 @@ class QEffKimiK25ForConditionalGeneration(nn.Module):
         )
 
         image_features_for_batch = image_features.unsqueeze(0).expand(input_ids.shape[0], -1, -1)
-        media_embedding = torch.cat(
-            [image_features_for_batch, final_embedding[:, image_features.shape[0] :, :]], dim=1
-        )
+        media_embedding = torch.cat([image_features_for_batch, final_embedding[:, image_features.shape[0] :, :]], dim=1)
         media_attention_mask = torch.cat(
             [
                 torch.ones(
