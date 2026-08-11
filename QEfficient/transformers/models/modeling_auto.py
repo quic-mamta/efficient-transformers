@@ -2407,13 +2407,6 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 vision_session.aic_to_np_dtype_mapping[binding.type]
             )
 
-        grid_thws_val = inputs.pop("grid_thws", None)
-        if grid_thws_val is not None:
-            h_val = int(grid_thws_val[0, 1].item())
-            w_val = int(grid_thws_val[0, 2].item())
-            vision_inputs["h_shape"] = np.ones((h_val), dtype=np.int64)
-            vision_inputs["w_shape"] = np.ones((w_val), dtype=np.int64)
-
         # Required for KIMI-K25
         grid_thws_val = inputs.pop("grid_thws", None)
         if grid_thws_val is not None:
@@ -3161,9 +3154,7 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         prefill_time = perf_counter() - prefill_start
         # Get first token
         inputs["input_ids"] = outputs["logits"].argmax(2)
-        inputs["position_ids"] = np.max(inputs["position_ids"], axis=-1, keepdims=True) + 1
-        if "image_idx_output" in outputs:
-            inputs["image_idx"] = chunk_inputs["image_idx"]
+        inputs["position_ids"] = input_len.numpy()
 
         if "cross_attention_mask" in inputs:
             bs, _, num_images, img_tiles = inputs["cross_attention_mask"].shape
@@ -3745,9 +3736,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             self.hash_params["chunking"] = True
             if self.model.config.model_type in {"qwen3_moe", "gpt_oss", "glm4_moe"}:
                 return max(prefill_seq_len or 0, constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)
-            seq_len = max(prefill_seq_len or 0, constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)
-            self.hash_params["chunking_seq_len"] = seq_len
-            return seq_len
+            return constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
 
         num_q_blocks = (
             self.hash_params["blocking_config"].num_q_blocks if self.hash_params.get("blocking_kwargs", None) else None
@@ -3913,6 +3902,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         # TODO: move this to a DA Serving utility class
         if self.model.config.model_type in SPECIALIZED_DISAGG_SERVING_MODEL_ARCH:
             if prefill_only:
+                if not enable_chunking and self.continuous_batching:
+                    raise NotImplementedError(
+                        "Looks like you are trying to run prefix-caching without chunking, this feature is not available yet!"
+                    )
                 self.__update_prefill_transform(enable=True, enable_chunking=enable_chunking)
                 self.hash_params.pop("retain_full_kv", None)
                 seq_len = self.get_seq_len_and_handle_specialized_prefill_model(
@@ -4132,12 +4125,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if kv_cache_prefix:
             output_names = apply_kv_cache_prefix(output_names, kv_cache_prefix)
             self.hash_params["kv_cache_prefix"] = kv_cache_prefix
-
-        if prefill_only:
-            assert prefill_seq_len is not None, "prefill_seq_len must be provided when prefill_only is True"
-            num_q_blocks_ffn = prefill_seq_len // constants.EXPERT_BLOCKING_PACKED_CHUNK_SIZE
-            num_q_blocks_ffn = num_q_blocks_ffn if num_q_blocks_ffn > 0 else 1
-            setattr(self.model.model, "num_q_blocks_ffn", num_q_blocks_ffn)
 
         if QEFFBaseModel._layerwise_active:
             return self._export_layerwise(

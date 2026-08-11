@@ -28,11 +28,6 @@ from urllib3.util.retry import Retry
 from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
 from QEfficient.utils._utils import create_json
 from QEfficient.utils.constants import QnnConstants
-from QEfficient.utils.load_kimi_utils import (
-    is_kimi_k25,
-    load_kimi_k25_layer_subset_model,
-    run_kimi_k25_hf_model_on_pytorch,
-)
 from QEfficient.utils.run_utils import ApiRunnerInternVL, ApiRunnerMolmo, ApiRunnerVlm
 from QEfficient.utils.test_utils import (
     InternProcessor,

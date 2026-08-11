@@ -25,13 +25,6 @@ from transformers import (
 from urllib3.util.retry import Retry
 
 from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
-from QEfficient.utils.load_kimi_utils import (
-    get_kimi_k25_test_config,
-    is_kimi_k25,
-    load_kimi_k25_layer_subset_model,
-    load_kimi_k25_model_from_config,
-    run_kimi_k25_hf_model_on_pytorch_CB,
-)
 from QEfficient.utils.run_utils import ApiRunnerInternVL, ApiRunnerMolmo, ApiRunnerVlm
 from QEfficient.utils.test_utils import (
     InternProcessor,
