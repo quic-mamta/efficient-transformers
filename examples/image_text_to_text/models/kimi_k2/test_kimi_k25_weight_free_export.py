@@ -43,9 +43,13 @@ def parse_args():
     parser.add_argument("--image-height", type=int, default=constants.KIMI_EXAMPLE_IMAGE_NUM_PATCHES_HEIGHT * constants.KIMI_PATCH_SIZE)
     parser.add_argument("--image-width", type=int, default=constants.KIMI_EXAMPLE_IMAGE_NUM_PATCHES_WIDTH * constants.KIMI_PATCH_SIZE)
     parser.add_argument("--expected-experts", type=int, default=384)
+    parser.add_argument("--num-vision-layers", type=int)
+    parser.add_argument("--num-text-layers", type=int)
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
     parser.add_argument("--mxfp6-matmul", action="store_true")
     parser.add_argument("--mxint8-kv-cache", action="store_true")
+    parser.add_argument("--prefill-only", action="store_true")
+    parser.add_argument("--moe-prefill-packed-chunk-size", type=int, default=1)
     parser.add_argument("--skip-export", action="store_true")
     parser.add_argument("--skip-compile", action="store_true")
     parser.add_argument("--vision-onnx-path", type=Path)
@@ -66,15 +70,41 @@ def resolve_local_model_path(model_path: Path) -> Path:
     return resolve_model_path(KIMI_K25_MODEL_NAME).resolve()
 
 
-def assert_full_kimi_config(config, expected_experts: int) -> None:
+def apply_layer_overrides(config, num_vision_layers: int | None, num_text_layers: int | None) -> None:
+    if num_vision_layers is not None:
+        if num_vision_layers < 1 or num_vision_layers > config.vision_config.vt_num_hidden_layers:
+            raise ValueError(
+                f"--num-vision-layers must be in [1, {config.vision_config.vt_num_hidden_layers}], "
+                f"got {num_vision_layers}"
+            )
+        config.vision_config.vt_num_hidden_layers = num_vision_layers
+    if num_text_layers is not None:
+        if num_text_layers < 1 or num_text_layers > config.text_config.num_hidden_layers:
+            raise ValueError(
+                f"--num-text-layers must be in [1, {config.text_config.num_hidden_layers}], got {num_text_layers}"
+            )
+        config.text_config.num_hidden_layers = num_text_layers
+
+
+def assert_kimi_config(config, expected_experts: int, expected_vision_layers: int | None, expected_text_layers: int | None) -> None:
     if getattr(config, "model_type", None) != "kimi_k25":
         raise AssertionError(f"Expected Kimi K2.5 config, got model_type={getattr(config, 'model_type', None)!r}")
     text_config = getattr(config, "text_config", None)
     routed_experts = getattr(text_config, "n_routed_experts", None)
     if routed_experts != expected_experts:
         raise AssertionError(f"Expected all {expected_experts} routed experts, got n_routed_experts={routed_experts}")
-    if getattr(text_config, "num_hidden_layers", 0) <= 2:
+    if expected_text_layers is None and getattr(text_config, "num_hidden_layers", 0) <= 2:
         raise AssertionError(f"Config looks reduced: num_hidden_layers={getattr(text_config, 'num_hidden_layers', None)}")
+    if expected_text_layers is not None and getattr(text_config, "num_hidden_layers", None) != expected_text_layers:
+        raise AssertionError(
+            f"Expected num_hidden_layers={expected_text_layers}, got {getattr(text_config, 'num_hidden_layers', None)}"
+        )
+    vision_config = getattr(config, "vision_config", None)
+    if expected_vision_layers is not None and getattr(vision_config, "vt_num_hidden_layers", None) != expected_vision_layers:
+        raise AssertionError(
+            "Expected vt_num_hidden_layers="
+            f"{expected_vision_layers}, got {getattr(vision_config, 'vt_num_hidden_layers', None)}"
+        )
 
 
 def assert_config_only_meta(qeff_model) -> None:
@@ -147,8 +177,8 @@ def validate_weight_free_onnx(onnx_path: Path, component_name: str) -> None:
     kimi_int4_inputs = sorted(name for name in spec_inputs if ".mlp.all_" in name and name.endswith(("_qweight", "_qzeros")))
     for name in kimi_int4_inputs:
         elem_type = graph_inputs[name].type.tensor_type.elem_type
-        if elem_type != TensorProto.INT32:
-            raise AssertionError(f"{component_name} Kimi int4 extdata input {name} dtype={elem_type}, expected INT32")
+        if elem_type != TensorProto.UINT8:
+            raise AssertionError(f"{component_name} Kimi int4 extdata input {name} dtype={elem_type}, expected UINT8")
 
     print(
         f"Validated {component_name}: extdata_weights={len(spec_inputs)}, "
@@ -168,6 +198,8 @@ def export_weight_free(qeff_model, args) -> dict[str, Path]:
             use_weight_free_export=True,
             use_onnx_subfunctions=args.use_onnx_subfunctions,
             prefill_seq_len=args.prefill_seq_len,
+            prefill_only=args.prefill_only,
+            moe_prefill_packed_chunk_size=args.moe_prefill_packed_chunk_size,
             offload_pt_weights=False,
         )
 
@@ -184,6 +216,8 @@ def compile_dual_qpc(qeff_model, args, qaic_config):
     qpc_paths = qeff_model.compile(
         compile_dir=str(args.compile_dir.expanduser().resolve()),
         prefill_seq_len=args.prefill_seq_len,
+        prefill_only=args.prefill_only,
+        moe_prefill_packed_chunk_size=args.moe_prefill_packed_chunk_size,
         ctx_len=args.ctx_len,
         batch_size=args.batch_size,
         num_devices=args.num_devices,
@@ -194,6 +228,8 @@ def compile_dual_qpc(qeff_model, args, qaic_config):
         image_width=args.image_width,
         use_onnx_subfunctions=args.use_onnx_subfunctions,
         use_weight_free_export=True,
+        vision_onnx_path=qeff_model.vision_model.onnx_path,
+        lang_onnx_path=qeff_model.lang_model.onnx_path,
         qaic_config=qaic_config,
     )
     if not isinstance(qpc_paths, dict) or "vision_qpc_path" not in qpc_paths:
@@ -209,7 +245,8 @@ def main() -> None:
     configure_environment(args)
     model_path = resolve_local_model_path(args.model_path)
     config = prepare_config(model_path)
-    assert_full_kimi_config(config, args.expected_experts)
+    apply_layer_overrides(config, args.num_vision_layers, args.num_text_layers)
+    assert_kimi_config(config, args.expected_experts, args.num_vision_layers, args.num_text_layers)
     qeff_model, qaic_config = build_qeff_model(model_path, config)
     onnx_paths = export_weight_free(qeff_model, args)
     print(f"Weight-free ONNX paths: {onnx_paths}")

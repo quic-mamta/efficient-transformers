@@ -145,7 +145,9 @@ class DtypeConversionCheckpointTransform(BaseCheckpointTransform):
         copy_checkpoint_aux_files(src, out)
 
         weight_map = read_weight_map(src)
-        shard_names = sorted(set(weight_map.values()))
+        allowed_keys = kwargs.get("allowed_checkpoint_keys")
+        selected_keys = {key for key in weight_map if allowed_keys is None or key in allowed_keys}
+        shard_names = sorted({weight_map[key] for key in selected_keys})
         new_name_for = {
             shard: (f"model_{idx:04d}.safetensors" if len(shard_names) > 1 else "model.safetensors")
             for idx, shard in enumerate(shard_names)
@@ -159,9 +161,12 @@ class DtypeConversionCheckpointTransform(BaseCheckpointTransform):
             tensors: Dict[str, torch.Tensor] = {}
             with safe_open(str(src / shard_name), framework="pt") as f:
                 for key in f.keys():
+                    if key not in selected_keys:
+                        continue
                     t = f.get_tensor(key)
                     tensors[key] = t.to(target_dtype) if t.is_floating_point() else t
-            atomic_save(tensors, out / new_name_for[shard_name])
+            if tensors:
+                atomic_save(tensors, out / new_name_for[shard_name])
 
         logger.info(
             f"DtypeConversionCheckpointTransform: converting {len(shard_names)} shards "
@@ -172,7 +177,7 @@ class DtypeConversionCheckpointTransform(BaseCheckpointTransform):
             for fut in as_completed(futures):
                 fut.result()
 
-        new_weight_map = {k: new_name_for[v] for k, v in weight_map.items()}
+        new_weight_map = {k: new_name_for[v] for k, v in weight_map.items() if k in selected_keys}
         write_index(out, new_weight_map)
         sentinel.touch()
         logger.info(f"DtypeConversionCheckpointTransform: done → {out}")
@@ -241,7 +246,47 @@ class KimiK25PackQuantizedExpertsCheckpointTransform(BaseCheckpointTransform):
         out.mkdir(parents=True, exist_ok=True)
         copy_checkpoint_aux_files(src, out)
         weight_map = read_weight_map(src)
-        shard_names = sorted(set(weight_map.values()))
+        model_config = kwargs.get("model_config")
+        text_config = getattr(model_config, "text_config", None)
+        max_text_layers = getattr(text_config, "num_hidden_layers", None)
+        allowed_keys = kwargs.get("allowed_checkpoint_keys")
+
+        def _key_allowed(key: str) -> bool:
+            return allowed_keys is None or key in allowed_keys
+
+        def _layer_stack_allowed(layer_prefix: str, output_name: str) -> bool:
+            if allowed_keys is None:
+                return True
+            return any(
+                f"{layer_prefix}.all_{output_name}_{suffix}" in allowed_keys
+                for suffix in ("qweight", "scales", "qzeros", "gidx")
+            )
+
+        def _mla_allowed(attn_prefix: str) -> bool:
+            if allowed_keys is None:
+                return True
+            return any(
+                f"{attn_prefix}.{suffix}" in allowed_keys
+                for suffix in (
+                    "q_up",
+                    "q_rope",
+                    "k_up",
+                    "v_up",
+                    "per_head_v_up",
+                    "per_head_q_up",
+                    "per_head_k_up",
+                    "per_head_k_up_normal",
+                    "fusedqk",
+                )
+            )
+
+        base_keys = {
+            key
+            for key in weight_map
+            if not (key.endswith((".weight_packed", ".weight_scale", ".weight_shape")) and ".mlp.experts." in key)
+            and _key_allowed(key)
+        }
+        shard_names = sorted({weight_map[key] for key in base_keys})
         new_name_for = {
             shard: (f"model_{idx:04d}.safetensors" if len(shard_names) > 1 else "model.safetensors")
             for idx, shard in enumerate(shard_names)
@@ -249,13 +294,22 @@ class KimiK25PackQuantizedExpertsCheckpointTransform(BaseCheckpointTransform):
         packed_prefixes = {match.group(1) for key in weight_map if (match := cls._PACKED_RE.match(key))}
         layer_expert_prefixes: Dict[str, Dict[int, Dict[str, str]]] = {}
         attn_prefixes = sorted(
-            {key[: -len(".q_b_proj.weight")] for key in weight_map if key.endswith(".self_attn.q_b_proj.weight")}
+            {
+                key[: -len(".q_b_proj.weight")]
+                for key in weight_map
+                if key.endswith(".self_attn.q_b_proj.weight") and _mla_allowed(key[: -len(".q_b_proj.weight")])
+            }
         )
         for key in weight_map:
             match = cls._EXPERT_RE.match(key)
             if not match:
                 continue
             layer_prefix, expert_idx, proj_name = match.group(1), int(match.group(2)), match.group(3)
+            layer_match = re.search(r"\.layers\.(\d+)\.", layer_prefix)
+            if max_text_layers is not None and layer_match and int(layer_match.group(1)) >= max_text_layers:
+                continue
+            if not any(_layer_stack_allowed(layer_prefix, output_name) for output_name in ("gate", "up", "down")):
+                continue
             expert_prefix = key[: -len(".weight_packed")]
             layer_expert_prefixes.setdefault(layer_prefix, {}).setdefault(expert_idx, {})[proj_name] = expert_prefix
 
@@ -263,12 +317,13 @@ class KimiK25PackQuantizedExpertsCheckpointTransform(BaseCheckpointTransform):
             tensors: Dict[str, torch.Tensor] = {}
             with safe_open(str(src / shard_name), framework="pt", device="cpu") as f:
                 for key in f.keys():
-                    if key.endswith((".weight_packed", ".weight_scale", ".weight_shape")) and ".mlp.experts." in key:
+                    if key not in base_keys:
                         continue
                     tensor = f.get_tensor(key)
                     tensors[key] = tensor.to(target_dtype) if tensor.is_floating_point() else tensor
 
-            atomic_save(tensors, out / new_name_for[shard_name])
+            if tensors:
+                atomic_save(tensors, out / new_name_for[shard_name])
 
         def _write_layer_stacks(layer_prefix: str, experts_by_idx: Dict[int, Dict[str, str]]) -> Dict[str, str]:
             layer_match = re.search(r"\.layers\.(\d+)\.", layer_prefix)
@@ -276,6 +331,8 @@ class KimiK25PackQuantizedExpertsCheckpointTransform(BaseCheckpointTransform):
             stacked_map: Dict[str, str] = {}
             proj_to_output = {"gate_proj": "gate", "up_proj": "up", "down_proj": "down"}
             for proj_name, output_name in proj_to_output.items():
+                if not _layer_stack_allowed(layer_prefix, output_name):
+                    continue
                 expert_indices = sorted(experts_by_idx)
                 expert_prefixes = [experts_by_idx[expert_idx][proj_name] for expert_idx in expert_indices]
                 converted = [cls._convert_pack_quantized_weight(src, weight_map, prefix) for prefix in expert_prefixes]
@@ -306,17 +363,15 @@ class KimiK25PackQuantizedExpertsCheckpointTransform(BaseCheckpointTransform):
                 num_groups = in_features // group_size
                 qzeros_groups = in_features // (group_size * 2)
                 tensors = {
-                    f"{layer_prefix}.all_{output_name}_qweight": qweight.to(torch.int32),
+                    f"{layer_prefix}.all_{output_name}_qweight": qweight.contiguous(),
                     f"{layer_prefix}.all_{output_name}_scales": scales.reshape(
                         qweight.shape[0], out_features, num_groups
                     )
-                    .to(torch.float32)
+                    .to(target_dtype)
                     .contiguous(),
                     f"{layer_prefix}.all_{output_name}_qzeros": qzeros.reshape(
                         qweight.shape[0], out_features, qzeros_groups
-                    )
-                    .to(torch.int32)
-                    .contiguous(),
+                    ).contiguous(),
                     f"{layer_prefix}.all_{output_name}_gidx": g_idx,
                 }
                 stack_name = f"kimi-k25-layer-{layer_idx}-{output_name}.safetensors"
@@ -387,15 +442,18 @@ class KimiK25PackQuantizedExpertsCheckpointTransform(BaseCheckpointTransform):
 
         new_weight_map = {}
         for key, shard_name in weight_map.items():
-            if key.endswith((".weight_packed", ".weight_scale", ".weight_shape")) and ".mlp.experts." in key:
+            if key not in base_keys:
                 continue
             new_weight_map[key] = new_name_for[shard_name]
         for layer_prefix, experts_by_idx in sorted(layer_expert_prefixes.items()):
             new_weight_map.update(_write_layer_stacks(layer_prefix, experts_by_idx))
         for attn_prefix in attn_prefixes:
+            layer_match = re.search(r"\.layers\.(\d+)\.", attn_prefix)
+            if max_text_layers is not None and layer_match and int(layer_match.group(1)) >= max_text_layers:
+                continue
             new_weight_map.update(_write_mla_tensors(attn_prefix))
 
-        _write_index(out, new_weight_map)
+        write_index(out, new_weight_map)
         sentinel.touch()
         logger.info(f"KimiK25PackQuantizedExpertsCheckpointTransform: done → {out}")
         return True

@@ -1316,6 +1316,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         FP8BlockWiseDequantLinearToLinearTransform,
         CustomOpsTransform,
         KVCacheTransform,
+        KVCacheExternalModuleMapperTransform,
         VlmKVOffloadTransform,
         SplitGateUpWeightsTransform,
     ]

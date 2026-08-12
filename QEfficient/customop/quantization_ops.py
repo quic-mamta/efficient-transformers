@@ -242,6 +242,7 @@ def _const_int32_node(name: str, values: list[int]):
 
 def _make_int32_unpack_nodes(input_name: str, output_name: str, node_index: int, used_names: set[str]):
     prefix = f"{output_name}_int32_unpack_{node_index}"
+    input_int32 = _unique_value_name(f"{prefix}_input_int32", used_names)
     sixteen = _unique_value_name(f"{prefix}_sixteen", used_names)
     lower = _unique_value_name(f"{prefix}_lower", used_names)
     upper = _unique_value_name(f"{prefix}_upper", used_names)
@@ -263,9 +264,10 @@ def _make_int32_unpack_nodes(input_name: str, output_name: str, node_index: int,
     last_dim_doubled = _unique_value_name(f"{prefix}_last_dim_doubled", used_names)
     new_shape = _unique_value_name(f"{prefix}_new_shape", used_names)
     return [
+        helper.make_node("Cast", [input_name], [input_int32], to=TensorProto.INT32),
         _const_int32_node(sixteen, [16]),
-        helper.make_node("Mod", [input_name, sixteen], [lower]),
-        helper.make_node("Div", [input_name, sixteen], [upper]),
+        helper.make_node("Mod", [input_int32, sixteen], [lower]),
+        helper.make_node("Div", [input_int32, sixteen], [upper]),
         _const_int64_node(axes_lower, [-1]),
         helper.make_node("Unsqueeze", [lower, axes_lower], [lower_unsqueezed]),
         _const_int64_node(axes_upper, [-1]),
@@ -326,8 +328,8 @@ def _rewrite_kimi_int4_extdata_to_int32_dequant(model: ModelProto) -> bool:
     transformed = False
     for name in kimi_inputs:
         tensor_type = graph_inputs[name].type.tensor_type
-        if tensor_type.elem_type != TensorProto.INT32:
-            tensor_type.elem_type = TensorProto.INT32
+        if tensor_type.elem_type != TensorProto.UINT8:
+            tensor_type.elem_type = TensorProto.UINT8
             transformed = True
 
     used_names = _used_value_names(model)

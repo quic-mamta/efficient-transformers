@@ -152,14 +152,14 @@ class Rope2DPosEmbRepeated(nn.Module):
             self.freqs_cis = self._precompute_freqs_cis(device)
 
         if not hasattr(self, "freqs_cos"):
-            self.register_buffer("freqs_cos", self.freqs_cis.real.contiguous(), persistent=False)
+            self.register_buffer("freqs_cos", self.freqs_cis[0].contiguous(), persistent=False)
         elif self.freqs_cos.device != device:
-            self.freqs_cos = self.freqs_cis.real.contiguous()
+            self.freqs_cos = self.freqs_cis[0].contiguous()
 
         if not hasattr(self, "freqs_sin"):
-            self.register_buffer("freqs_sin", self.freqs_cis.imag.contiguous(), persistent=False)
+            self.register_buffer("freqs_sin", self.freqs_cis[1].contiguous(), persistent=False)
         elif self.freqs_sin.device != device:
-            self.freqs_sin = self.freqs_cis.imag.contiguous()
+            self.freqs_sin = self.freqs_cis[1].contiguous()
 
     def _precompute_freqs_cis(self, device: torch.device) -> torch.Tensor:
         """Calculate the cis(freqs) for each position in the 2D grid.
@@ -176,13 +176,15 @@ class Rope2DPosEmbRepeated(nn.Module):
         freqs = 1.0 / (self.theta_base ** (dim_range / self.dim))
         x_freqs = torch.outer(x_pos, freqs).float()  # N, C/4
         y_freqs = torch.outer(y_pos, freqs).float()  # N, C/4
-        x_cis = torch.polar(torch.ones_like(x_freqs), x_freqs)  # N, C/4
-        y_cis = torch.polar(torch.ones_like(y_freqs), y_freqs)  # N, C/4
+        x_cos, x_sin = torch.cos(x_freqs), torch.sin(x_freqs)  # N, C/4
+        y_cos, y_sin = torch.cos(y_freqs), torch.sin(y_freqs)  # N, C/4
         # N, C/4, 2
-        freqs_cis = torch.cat([x_cis.unsqueeze(dim=-1), y_cis.unsqueeze(dim=-1)], dim=-1)
+        freqs_cos = torch.cat([x_cos.unsqueeze(dim=-1), y_cos.unsqueeze(dim=-1)], dim=-1)
+        freqs_sin = torch.cat([x_sin.unsqueeze(dim=-1), y_sin.unsqueeze(dim=-1)], dim=-1)
         # max_height, max_width, C/2
-        freqs_cis = freqs_cis.reshape(self.max_height, self.max_width, -1)
-        return freqs_cis
+        freqs_cos = freqs_cos.reshape(self.max_height, self.max_width, -1)
+        freqs_sin = freqs_sin.reshape(self.max_height, self.max_width, -1)
+        return torch.stack([freqs_cos, freqs_sin], dim=0)
 
     def get_freqs_cis(self, grid_thws: torch.Tensor, device: torch.device) -> torch.Tensor:
         """
@@ -200,8 +202,8 @@ class Rope2DPosEmbRepeated(nn.Module):
             self.max_width,
         )
         freqs_cis = torch.cat(
-            [self.freqs_cis[:h, :w].reshape(-1, self.dim // 2).repeat(t, 1) for t, h, w in shapes],
-            dim=0,
+            [self.freqs_cis[:, :h, :w].reshape(2, -1, self.dim // 2).repeat(1, t, 1) for t, h, w in shapes],
+            dim=1,
         )
         return freqs_cis
 
