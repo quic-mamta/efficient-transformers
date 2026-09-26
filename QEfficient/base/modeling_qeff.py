@@ -141,7 +141,13 @@ def _weight_free_spec_input_names(weight_spec_path: Path) -> set[str]:
 
 
 def _copy_weight_free_spec(weight_spec_path: Path, artifact_dir: Path) -> None:
-    """Copy the weight-free sidecar metadata needed to inspect replay inputs."""
+    """Copy only the weight-free sidecar metadata, not checkpoint weight files.
+
+    The compiler consumes the same extdata metadata embedded in the ONNX and
+    resolves its ``files`` entries from ``AIC_EXTERNAL_DATA_ROOT``. Copying the
+    sidecar keeps the bundle inspectable without creating stale duplicate weight
+    files that still point back to their original cache location.
+    """
     if not weight_spec_path.is_file():
         raise FileNotFoundError(f"Weight spec file not found at: {weight_spec_path}")
 
@@ -1515,7 +1521,13 @@ class QEFFBaseModel(ABC):
                 "set -euo pipefail",
                 'cd -- "$(dirname -- "$0")"',
                 *(
-                    (f"export AIC_EXTERNAL_DATA_ROOT={shlex.quote(str(external_data_root))}",)
+                    (
+                        'if [[ -z "${AIC_EXTERNAL_DATA_ROOT:-}" ]]; then',
+                        f"  export AIC_EXTERNAL_DATA_ROOT={shlex.quote(str(external_data_root))}",
+                        "else",
+                        "  export AIC_EXTERNAL_DATA_ROOT",
+                        "fi",
+                    )
                     if external_data_root is not None
                     else ()
                 ),

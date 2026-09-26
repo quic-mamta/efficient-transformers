@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any, List, Optional
 from unittest.mock import patch
 
+import numpy as np
 import onnx
 import pytest
 import torch
-from onnx import TensorProto, helper
+from onnx import TensorProto, helper, numpy_helper
 from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 
 from QEfficient.base.modeling_qeff import generate_mdp_compiler_dump
@@ -547,7 +548,11 @@ def _bounds_to_layer_counts(bounds: List[int], total_layers: int) -> List[int]:
     return [pts[i + 1] - pts[i] for i in range(len(pts) - 1)]
 
 
-def _build_synthetic_gpt2_onnx(num_layers: int, out_path: Path) -> None:
+def _build_synthetic_gpt2_onnx(
+    num_layers: int,
+    out_path: Path,
+    external_data_file: Optional[str] = None,
+) -> None:
     """Write a minimal ONNX graph whose nodes carry 'h.N' transformer-layer names.
 
     The graph has topology: embed_tokens -> h.0/* -> h.1/* -> ... -> lm_head.
@@ -556,7 +561,14 @@ def _build_synthetic_gpt2_onnx(num_layers: int, out_path: Path) -> None:
     ONNX strategy end-to-end without loading a real model.
     """
     nodes: List[Any] = []
-    nodes.append(helper.make_node("Identity", inputs=["input_ids"], outputs=["embed_out"], name="embed_tokens"))
+    initializers: List[Any] = []
+    if external_data_file is None:
+        nodes.append(helper.make_node("Identity", inputs=["input_ids"], outputs=["embed_out"], name="embed_tokens"))
+    else:
+        initializers.append(numpy_helper.from_array(np.zeros((1, 8), dtype=np.float32), name="embed_bias"))
+        nodes.append(
+            helper.make_node("Add", inputs=["input_ids", "embed_bias"], outputs=["embed_out"], name="embed_tokens")
+        )
     prev_out = "embed_out"
     for layer_idx in range(num_layers):
         attn_out = f"attn_out_{layer_idx}"
@@ -571,9 +583,21 @@ def _build_synthetic_gpt2_onnx(num_layers: int, out_path: Path) -> None:
         "synthetic_gpt2_graph",
         [helper.make_tensor_value_info("input_ids", TensorProto.FLOAT, [1, 8])],
         [helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 8, 500])],
+        initializer=initializers,
     )
     onnx_model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
-    onnx.save(onnx_model, str(out_path))
+    if external_data_file is None:
+        onnx.save(onnx_model, str(out_path))
+        return
+
+    onnx.save_model(
+        onnx_model,
+        str(out_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=external_data_file,
+        size_threshold=0,
+    )
 
 
 def _fake_subprocess_run(command: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
@@ -827,7 +851,7 @@ class TestMdpCompileIntegration:
         compile_dir = None
 
         try:
-            _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path)
+            _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path, external_data_file="model.onnx.data")
             npi_path.write_text("FP32NodeInstanceNames: []\n")
             model_hf, _ = make_tiny_gpt2()
             qeff = QEFFAutoModelForCausalLM(model_hf)
@@ -852,6 +876,7 @@ class TestMdpCompileIntegration:
             assert (compile_dir / "specializations.json").is_file()
             assert (compile_dir / "custom_io.yaml").is_file()
             assert (compile_dir / onnx_path.name).read_bytes() == onnx_path.read_bytes()
+            assert (compile_dir / "model.onnx.data").read_bytes() == (tmp_path / "model.onnx.data").read_bytes()
             assert (compile_dir / "hashed_compile_params.json").is_file()
             assert (compile_dir / npi_path.name).read_text() == npi_path.read_text()
             replay_command = replay_script.read_text()
