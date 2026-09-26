@@ -219,7 +219,8 @@ def _required_host_input_names(graph: onnx.GraphProto, onnx_path: Path) -> set[s
     return {
         graph_input.name
         for graph_input in graph.input
-        if graph_input.name not in retained_inputs and graph_input.name not in initializer_names
+        if graph_input.name not in retained_inputs
+        and graph_input.name not in initializer_names
         and graph_input.name not in weight_free_inputs
     }
 
