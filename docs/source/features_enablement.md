@@ -145,7 +145,12 @@ io_dir = model.generate(
 
 The returned compile directory (`compile_dir`) contains `qaic-compile.sh`, `specializations.json`, `custom_io.yaml` and node precision info (NPI) files when required, and the compiler hash inputs. The returned generation directory contains `aic_batch_io.json` and raw host inputs under `data/`.
 
-For weight-free CausalLM export, instantiate the model with `weight_free=True` and pass `artifacts=True` to `compile()`. The returned compile directory is self-contained for compiler replay: it includes the ONNX model, `weight_spec.json`, and the safetensors checkpoint files referenced by the weight spec, in addition to the replay script and compile configuration files.
+For weight-free CausalLM export, instantiate the model with `weight_free=True`
+and pass `artifacts=True` to `compile()`. The returned compile directory
+includes the ONNX model, `weight_spec.json`, the replay script, and compile
+configuration files. The replay script exports `AIC_EXTERNAL_DATA_ROOT` so the
+compiler resolves safetensors checkpoint files from the Hugging Face Hub cache
+instead of copying model weights into the bundle.
 
 ```python
 model = QEFFAutoModelForCausalLM.from_pretrained(

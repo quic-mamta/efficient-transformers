@@ -869,14 +869,15 @@ class TestMdpCompileIntegration:
             onnx_path.unlink(missing_ok=True)
             npi_path.unlink(missing_ok=True)
 
-    def test_compile_artifacts_copies_weight_free_export_inputs(self, tmp_path):
+    def test_compile_artifacts_sets_weight_free_external_data_root(self, tmp_path, monkeypatch):
         onnx_path = tmp_path / "model.onnx"
-        checkpoint_root = tmp_path / "checkpoint_root"
-        checkpoint_path = checkpoint_root / "prepared" / "model.safetensors"
+        hf_cache = tmp_path / "hf_cache"
+        checkpoint_path = hf_cache / "models--org--model" / "snapshots" / "prepared" / "model.safetensors"
         compile_root = tmp_path / "compile"
         compile_dir = None
 
         try:
+            monkeypatch.setenv("HF_HUB_CACHE", str(hf_cache))
             _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path)
             checkpoint_path.parent.mkdir(parents=True)
             checkpoint_path.write_bytes(b"FAKE_SAFE_TENSORS")
@@ -884,9 +885,14 @@ class TestMdpCompileIntegration:
             weight_spec_path.write_text(
                 json.dumps(
                     {
-                        "files": [{"format": "safetensors", "path": "prepared/model.safetensors"}],
+                        "files": [
+                            {
+                                "format": "safetensors",
+                                "path": "models--org--model/snapshots/prepared/model.safetensors",
+                            }
+                        ],
                         "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
-                        "model_id": str(checkpoint_root / "prepared"),
+                        "model_id": str(checkpoint_path.parent),
                         "model_name": "GPT2LMHeadModel",
                         "version": 5,
                     }
@@ -908,10 +914,11 @@ class TestMdpCompileIntegration:
             compiler_run.assert_not_called()
             assert (compile_dir / onnx_path.name).read_bytes() == onnx_path.read_bytes()
             assert (compile_dir / weight_spec_path.name).read_text() == weight_spec_path.read_text()
-            assert (compile_dir / "prepared" / "model.safetensors").read_bytes() == checkpoint_path.read_bytes()
+            assert not (compile_dir / "models--org--model").exists()
             replay_command = (compile_dir / "qaic-compile.sh").read_text()
             assert f"-m={onnx_path.name}" in replay_command
-            assert str(tmp_path) not in replay_command
+            assert f"export AIC_EXTERNAL_DATA_ROOT={hf_cache}" in replay_command
+            assert str(checkpoint_path) not in replay_command
         finally:
             if compile_dir is not None:
                 shutil.rmtree(compile_dir, ignore_errors=True)

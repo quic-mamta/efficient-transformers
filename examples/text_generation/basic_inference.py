@@ -101,7 +101,7 @@ def main():
     if args.artifacts:
         print(f"Compiler artifacts written to: {qpc_path}")
         if args.weight_free:
-            print("Weight-free compiler bundle includes ONNX, weight_spec.json, and checkpoint weights.")
+            print("Weight-free compiler bundle references checkpoint weights via AIC_EXTERNAL_DATA_ROOT.")
     else:
         print(f"Model compiled to: {qpc_path}")
 
