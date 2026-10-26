@@ -349,13 +349,9 @@ def _logical_proxy_signature_info(qeff_model, decoder_call_nodes):
         return None
 
     signature_horizon = _get_signature_horizon(language_config, num_hidden_layers)
-    required_signatures = {
-        _get_layer_signature(language_config, layer_idx)
-        for layer_idx in range(signature_horizon)
-    }
+    required_signatures = {_get_layer_signature(language_config, layer_idx) for layer_idx in range(signature_horizon)}
     observed_signatures = [
-        _get_layer_signature(language_config, layer_idx)
-        for layer_idx in range(len(decoder_call_nodes))
+        _get_layer_signature(language_config, layer_idx) for layer_idx in range(len(decoder_call_nodes))
     ]
     return required_signatures, observed_signatures, Counter(observed_signatures)
 
