@@ -517,6 +517,7 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
         token_value_states = None
         blocking_config = getattr(self, "attn_blocking_config", AttentionBlockingConfig())
         num_kv_shared_layers = int(getattr(self.config, "num_kv_shared_layers", 0) or 0)
+        shared_kv_key = self.layer_type
         disable_blocking_for_store_full_kv = self.store_full_length_kv and num_kv_shared_layers > 0
         has_valid_blocking_mode = blocking_config is not None and (blocking_config.mode != BlockingMode.NONE)
         # KV-sharing layers reuse KV from an earlier layer, so they should not run a blocked KV update path.
@@ -543,11 +544,11 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
         query_states = query_states.transpose(1, 2)
 
         if self.is_kv_shared_layer and past_key_values is not None:
-            key_states, value_states = past_key_values.shared_layers[self.layer_idx]
+            key_states, value_states = past_key_values.shared_layers[shared_kv_key]
             key_states = key_states.to(query_states.device, dtype=target_dtype)
             value_states = value_states.to(query_states.device, dtype=target_dtype)
             if hasattr(past_key_values, "shared_layers_token"):
-                token_states = past_key_values.shared_layers_token.get(self.layer_idx)
+                token_states = past_key_values.shared_layers_token.get(shared_kv_key)
                 if token_states is not None:
                     token_key_states, token_value_states = token_states
         else:
@@ -633,9 +634,9 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
                     past_key_values.shared_layers = {}
                 if not hasattr(past_key_values, "shared_layers_token"):
                     past_key_values.shared_layers_token = {}
-                past_key_values.shared_layers[self.layer_idx] = key_states, value_states
+                past_key_values.shared_layers[shared_kv_key] = key_states, value_states
                 if token_key_states is not None and token_value_states is not None:
-                    past_key_values.shared_layers_token[self.layer_idx] = token_key_states, token_value_states
+                    past_key_values.shared_layers_token[shared_kv_key] = token_key_states, token_value_states
 
         if (
             mm_token_type_ids is not None

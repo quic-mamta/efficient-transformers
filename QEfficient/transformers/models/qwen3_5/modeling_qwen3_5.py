@@ -1208,9 +1208,11 @@ class QEffQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         layer_type = getattr(self, "layer_type", getattr(self, "block_type", None))
         self.layer_type = layer_type
         if layer_type == "linear_attention":
+            self.__class__ = QEffQwen3_5LinearAttentionDecoderLayer
             self.linear_attn.__class__ = QEffQwen3_5GatedDeltaNet
             self.linear_attn.__qeff_init__()
         elif layer_type == "full_attention":
+            self.__class__ = QEffQwen3_5FullAttentionDecoderLayer
             self.self_attn.__class__ = QEffQwen3_5Attention
             self.self_attn.__qeff_init__()
 

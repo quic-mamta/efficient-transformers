@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import copy
 import io
-import os
 import time
 from pathlib import Path
 
@@ -33,8 +32,6 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-from QEfficient.utils import cache as qeff_cache
-from QEfficient.utils.device_utils import get_qaic_mdp_device_groups
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
@@ -46,15 +43,6 @@ from ._helpers import (
 )
 
 GPT_OSS_TINY_MODEL_ID = "tiny-random/gpt-oss"
-
-
-@pytest.fixture(autouse=True)
-def local_weight_free_checkpoint_home(tmp_export_dir, monkeypatch):
-    checkpoint_home = tmp_export_dir / "prepared_checkpoints"
-    checkpoint_home.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("QEFF_WF_HOME", str(checkpoint_home))
-    monkeypatch.setattr(qeff_cache, "QEFF_CHECKPOINT_HOME", checkpoint_home)
-
 
 DISAGG_MODEL_IDS = (
     ("qwen3_moe", "tiny-random/qwen3-moe"),
@@ -108,33 +96,10 @@ def _compile_dir(tmp_export_dir, name):
     return str(compile_dir)
 
 
-def _gpt_oss_parity_device_ids(
-    prefill_num_devices: int, decode_num_devices: int
-) -> tuple[list[int] | None, list[int] | None]:
-    if os.environ.get("QAIC_VISIBLE_DEVICES"):
-        return list(range(prefill_num_devices)), list(range(decode_num_devices))
-
-    prefill_groups = get_qaic_mdp_device_groups(devices_per_group=prefill_num_devices)
-    decode_groups = get_qaic_mdp_device_groups(devices_per_group=decode_num_devices)
-    if not prefill_groups or not decode_groups:
-        return None, None
-
-    for prefill_ids in reversed(prefill_groups):
-        prefill_set = set(prefill_ids)
-        for decode_ids in reversed(decode_groups):
-            if prefill_set.isdisjoint(decode_ids):
-                return prefill_ids, decode_ids
-    return prefill_groups[-1], decode_groups[-1]
-
-
 def _build_disagg_decode_blocking_qaic_config(blocking_key: str) -> dict:
     qaic_config = dict(WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key])
     qaic_config["ctx_len"] = CTX_LEN
     return qaic_config
-
-
-def _use_disagg_onnx_subfunctions(model_type: str) -> bool:
-    return model_type != "gpt_oss"
 
 
 def _assert_disagg_blocking_artifact(
@@ -347,56 +312,10 @@ def _next_token_ids_from_logits(logits: np.ndarray, token_index: int | None = No
     return logits[:, token_index, :].argmax(axis=-1).astype(np.int64)
 
 
-def _set_logits_output_buffer(session, input_seq_len: int, batch_size: int = 1) -> None:
-    logits_binding_idx = session.binding_index_map.get("logits")
-    if logits_binding_idx is None:
-        return
-    logits_seq_len = 1
-    input_ids_binding_idx = session.binding_index_map.get("input_ids")
-    if input_ids_binding_idx is not None:
-        for shape_spec in getattr(session, "allowed_shapes", []):
-            if len(shape_spec) <= max(input_ids_binding_idx, logits_binding_idx):
-                continue
-            input_dims = shape_spec[input_ids_binding_idx][1]
-            logits_dims = shape_spec[logits_binding_idx][1]
-            if len(input_dims) >= 2 and len(logits_dims) >= 2 and int(input_dims[1]) == int(input_seq_len):
-                logits_seq_len = int(logits_dims[1])
-                break
-    vocab_size = int(session.bindings[logits_binding_idx].dims[-1])
-    logits_dtype = np.float16 if session.binding_is_bfloat16("logits") else np.float32
-    session.set_buffers({"logits": np.zeros((batch_size, logits_seq_len, vocab_size), dtype=logits_dtype)})
-
-
-def _session_input_seq_len(session) -> int:
-    input_ids_binding_idx = session.binding_index_map["input_ids"]
-    seq_lens = [shape_spec[input_ids_binding_idx][1][1] for shape_spec in getattr(session, "allowed_shapes", [])]
-    seq_lens.append(session.bindings[input_ids_binding_idx].dims[1])
-    return int(max(seq_lens))
-
-
 def test_next_token_ids_from_logits_uses_single_kept_prefill_logit() -> None:
     logits = np.array([[[0.1, 0.2, 0.9, 0.3]]], dtype=np.float32)
 
     token_ids = _next_token_ids_from_logits(logits, token_index=7)
-
-    assert token_ids.tolist() == [2]
-
-
-def test_next_token_ids_from_logits_uses_last_valid_prefill_logit() -> None:
-    logits = np.array(
-        [
-            [
-                [0.1, 0.9, 0.2, 0.3],
-                [0.1, 0.2, 0.9, 0.3],
-                [0.1, 0.2, 0.3, 0.9],
-            ]
-        ],
-        dtype=np.float32,
-    )
-    position_ids = np.array([[0, 1, -1]], dtype=np.int64)
-    token_index = int(np.flatnonzero(position_ids[0] >= 0)[-1])
-
-    token_ids = _next_token_ids_from_logits(logits, token_index=token_index)
 
     assert token_ids.tolist() == [2]
 
@@ -488,7 +407,7 @@ def _run_vlm_disaggregated_generation(
         name: value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
         for name, value in processor_inputs.items()
     }
-    prefill_seq_len = _session_input_seq_len(prefill_session)
+    prefill_seq_len = int(prefill_session.bindings[prefill_session.binding_index_map["input_ids"]].dims[1])
     model_type = getattr(qeff_model.model.config, "model_type", None)
     if model_type == "qwen3_vl_moe":
         inputs = qeff_model.model.prepare_inputs_for_generation(
@@ -547,14 +466,11 @@ def _run_vlm_disaggregated_generation(
                 :, chunk_idx * prefill_seq_len : (chunk_idx + 1) * prefill_seq_len
             ]
         assert chunk_inputs["input_ids"].shape[1] == prefill_seq_len
-        _set_logits_output_buffer(prefill_session, input_seq_len=prefill_seq_len)
         prefill_outputs = prefill_session.run(chunk_inputs)
         _update_vlm_retained_states(chunk_inputs, prefill_outputs, num_hidden_layers)
         chunk_inputs["image_idx"] = prefill_outputs["image_idx_output"]
 
-    valid_token_indices = np.flatnonzero(chunk_inputs["position_ids"][0] >= 0)
-    token_index = int(valid_token_indices[-1])
-    generated_ids = [_next_token_ids_from_logits(prefill_outputs["logits"], token_index=token_index)]
+    generated_ids = [_next_token_ids_from_logits(prefill_outputs["logits"])]
     decode_inputs = {
         "input_ids": generated_ids[-1].reshape(1, 1),
         "position_ids": np.max(lang_inputs["position_ids"], axis=-1, keepdims=True) + 1,
@@ -562,7 +478,11 @@ def _run_vlm_disaggregated_generation(
     if "mm_token_type_ids" in lang_inputs:
         decode_inputs["mm_token_type_ids"] = np.zeros((1, 1), dtype=lang_inputs["mm_token_type_ids"].dtype)
     _update_vlm_retained_states(decode_inputs, prefill_outputs, num_hidden_layers)
-    _set_logits_output_buffer(decode_session, input_seq_len=1)
+    for output_name in ("image_idx_output", "vision_embeds_RetainedState"):
+        if output_name in prefill_outputs:
+            decode_inputs[
+                output_name.removesuffix("_RetainedState") if output_name.endswith("_RetainedState") else "image_idx"
+            ] = prefill_outputs[output_name]
     decode_outputs = decode_session.run(decode_inputs)
     generated_ids.append(_next_token_ids_from_logits(decode_outputs["logits"]))
     return np.stack(generated_ids, axis=1)
@@ -684,7 +604,7 @@ def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_
         "num_cores": 4,
         "mxfp6_matmul": False,
         "mxint8_kv_cache": False,
-        "use_onnx_subfunctions": _use_disagg_onnx_subfunctions(model_type),
+        "use_onnx_subfunctions": True,
         "offload_pt_weights": False,
         "retain_full_kv": True,
     }
@@ -829,7 +749,7 @@ def test_weight_free_disaggregated_continuous_batching(model_type, model_id, tmp
         "mxint8_kv_cache": False,
         "split_retained_state_io": True,
         "retain_full_kv": True,
-        "use_onnx_subfunctions": _use_disagg_onnx_subfunctions(model_type),
+        "use_onnx_subfunctions": True,
         "offload_pt_weights": True,
     }
 
@@ -1197,10 +1117,6 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
     sessions = []
     compiled_onnx_paths = {}
     try:
-        prefill_device_ids, decode_device_ids = _gpt_oss_parity_device_ids(
-            dma_config["prefill_num_devices"],
-            dma_config["decode_num_devices"],
-        )
         decode_qpc_path = qeff_model.compile(
             compile_dir=_compile_dir(tmp_export_dir, "gpt_oss_wf_cb_decode_parity"),
             prefill_seq_len=1,
@@ -1245,14 +1161,12 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
 
         prefill_session = QAICInferenceSession(
             prefill_qpc_path,
-            device_ids=prefill_device_ids,
             kv_dma_share=True,
             full_batch_size=GPT_OSS_PARITY_FULL_BATCH_SIZE,
             cluster_id="prefill",
         )
         decode_session = QAICInferenceSession(
             decode_qpc_path,
-            device_ids=decode_device_ids,
             kv_dma_share=True,
             full_batch_size=GPT_OSS_PARITY_FULL_BATCH_SIZE,
             cluster_id="decode",

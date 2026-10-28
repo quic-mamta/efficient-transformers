@@ -62,7 +62,7 @@ def _config_hasattr(config, name):
         return name in getattr(config, "__dict__", {})
 
 
-def make_tiny_gemma4():
+def make_tiny_gemma4(layer_types=None, num_kv_shared_layers=0):
     """
     Minimal Gemma4 vision+text config with both sliding and full attention text layers.
     Softcapping is disabled so HF and QEff logits are directly comparable.
@@ -70,7 +70,8 @@ def make_tiny_gemma4():
     Gemma4Config, Gemma4TextConfig, Gemma4VisionConfig, Gemma4ForConditionalGeneration, _ = _load_gemma4_classes()
 
     text_cfg = Gemma4TextConfig()
-    text_cfg.num_hidden_layers = 2
+    layer_types = layer_types or ["sliding_attention", "full_attention"]
+    text_cfg.num_hidden_layers = len(layer_types)
     text_cfg.num_attention_heads = 2
     text_cfg.num_key_value_heads = 2
     text_cfg.hidden_size = 64
@@ -90,7 +91,9 @@ def make_tiny_gemma4():
     if _config_hasattr(text_cfg, "sliding_window"):
         text_cfg.sliding_window = 8
     if _config_hasattr(text_cfg, "layer_types"):
-        text_cfg.layer_types = ["sliding_attention", "full_attention"]
+        text_cfg.layer_types = layer_types
+    if _config_hasattr(text_cfg, "num_kv_shared_layers"):
+        text_cfg.num_kv_shared_layers = num_kv_shared_layers
     if _config_hasattr(text_cfg, "_sliding_window_pattern"):
         text_cfg._sliding_window_pattern = 2
     if _config_hasattr(text_cfg, "sliding_window_pattern"):
@@ -122,7 +125,7 @@ def make_tiny_gemma4():
     if _config_hasattr(vision_cfg, "intermediate_size"):
         vision_cfg.intermediate_size = 128
     if _config_hasattr(vision_cfg, "num_hidden_layers"):
-        vision_cfg.num_hidden_layers = 2
+        vision_cfg.num_hidden_layers = len(layer_types)
     if _config_hasattr(vision_cfg, "num_attention_heads"):
         vision_cfg.num_attention_heads = 2
     if _config_hasattr(vision_cfg, "num_key_value_heads"):
@@ -418,6 +421,17 @@ class TestQEffGemma4Architecture:
             _qeff_forward(qeff, **_prefill_inputs(input_ids, cfg))
 
         rotary_forward.assert_not_called()
+
+    def test_shared_kv_cache_uses_layer_type_key(self):
+        model, cfg = make_tiny_gemma4(layer_types=["full_attention", "full_attention"], num_kv_shared_layers=1)
+        qeff = _make_qeff_gemma4(model)
+        layers = qeff.lang_model.model.language_model.layers
+        assert layers[0].self_attn.store_full_length_kv
+        assert layers[1].self_attn.is_kv_shared_layer
+        input_ids = torch.randint(0, VOCAB_SIZE, (1, PREFILL_LEN))
+
+        with torch.no_grad():
+            _qeff_forward(qeff, **_prefill_inputs(input_ids, cfg))
 
 
 # ---------------------------------------------------------------------------
