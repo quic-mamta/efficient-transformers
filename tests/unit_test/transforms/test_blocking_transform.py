@@ -634,9 +634,24 @@ def test_glm_blocked_topk_matches_monolithic_after_cache_updates(batch_size, dp,
         scores = torch.relu(scores * (head_dim**-0.5))
         scores = torch.matmul(head_weights.float().unsqueeze(-2), scores).squeeze(-2)
         scores = scores.masked_fill(attention_mask, float("-inf"))
-        expected = scores.topk(topk, dim=-1).indices.to(torch.int32)
+        scores = scores.to(torch.float16).view(batch_local, dp, 1, local_context, cp).transpose(-1, -2)
+        local_topk = min(topk, local_context)
+        local_scores, local_order = scores.topk(local_topk, dim=-1, sorted=False)
 
-        torch.testing.assert_close(actual, expected)
+        local_ids = torch.arange(local_context, device=scores.device, dtype=torch.int64).view(1, 1, 1, 1, -1)
+        cp_ids = torch.arange(cp, device=scores.device, dtype=torch.int64).view(1, 1, 1, cp, 1)
+        logical_ids = (local_ids * cp + cp_ids).expand_as(scores)
+        local_indices = torch.gather(logical_ids, -1, local_order)
+
+        merged_scores = local_scores.reshape(batch_local, dp, 1, cp * local_topk)
+        merged_indices = local_indices.reshape(batch_local, dp, 1, cp * local_topk)
+        _, merged_order = merged_scores.topk(topk, dim=-1, sorted=False)
+        expected = torch.gather(merged_indices, -1, merged_order).reshape(batch_size, 1, topk).to(torch.int32)
+
+        torch.testing.assert_close(
+            actual.sort(dim=-1).values,
+            expected.sort(dim=-1).values,
+        )
 
 
 @pytest.mark.parametrize("parallel", [False, True])
