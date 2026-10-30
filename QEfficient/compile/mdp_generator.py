@@ -164,6 +164,7 @@ def precheck_and_autofix_mdp_partition_order(
     mdp_json: Dict[str, Any],
     max_rounds: int = 8,
     protected_nodes: Optional[Set[str]] = None,
+    drop_alias_prone: bool = True,
 ) -> int:
     """Best-effort pre-check: scan all violation pairs and auto-fix before compile."""
     removed_total = 0
